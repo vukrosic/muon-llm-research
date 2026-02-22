@@ -64,5 +64,9 @@ class Muon(torch.optim.Optimizer):
                 buf.lerp_(g, 1 - group["momentum"])
                 g = g.lerp_(buf, group["momentum"]) if group["nesterov"] else buf
                 g = zeropower_polar_express(g, steps=group["ns_steps"]) # steps are 5 for both ns and pe
+                
+                # Store update for research/manifold tracking
+                state["last_update"] = g.detach().cpu()
+                
                 g = g.to(p.dtype)
                 p.add_(g.view_as(p), alpha=-group["lr"] * max(1, p.size(-2) / p.size(-1))**0.5)

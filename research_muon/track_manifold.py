@@ -77,15 +77,21 @@ def plot_results(history, save_dir):
     keys = ['spec_norm_Q_0', 'spec_norm_V_0', f'spec_norm_Q_{last_idx}', f'spec_norm_V_{last_idx}']
     labels = ['Q (First)', 'V (First)', f'Q (Layer {last_idx})', f'V (Layer {last_idx})']
     
+    steps = history.get('steps', None)
+    
     for k, l, c in zip(keys, labels, colors):
         if k in history and history[k]:
             data = history[k]
             # Only downsample if we have lots of data
             step_size = max(1, len(data) // 100)
-            plt.plot(data[::step_size], label=l, color=c, linewidth=2, marker='o' if len(data) < 20 else None)
+            
+            if steps is not None and len(steps) == len(data):
+                plt.plot(steps[::step_size], data[::step_size], label=l, color=c, linewidth=2, marker='o' if len(data) < 20 else None)
+            else:
+                plt.plot(data[::step_size], label=l, color=c, linewidth=2, marker='o' if len(data) < 20 else None)
             
     plt.title('Hierarchical Stretching: Max Spectral Norm Evolution')
-    plt.xlabel('Optimizer Steps')
+    plt.xlabel('Training Steps')
     plt.ylabel('Spectral / Operator Norm')
     plt.legend(frameon=True)
     plt.grid(True, alpha=0.3)
@@ -94,16 +100,26 @@ def plot_results(history, save_dir):
 
     # 3. Spectral Gap (Q projections)
     plt.figure(figsize=(10, 6))
+    steps = history.get('steps', None)
+    
     if 'spec_gap_Q_0' in history and history['spec_gap_Q_0']:
         data0 = history['spec_gap_Q_0']
         step0 = max(1, len(data0) // 100)
-        plt.plot(data0[::step0], label='Layer 0 Gap', color='#16a085', marker='o' if len(data0) < 20 else None)
+        if steps is not None and len(steps) == len(data0):
+            plt.plot(steps[::step0], data0[::step0], label='Layer 0 Gap', color='#16a085', marker='o' if len(data0) < 20 else None)
+        else:
+            plt.plot(data0[::step0], label='Layer 0 Gap', color='#16a085', marker='o' if len(data0) < 20 else None)
+
     if 'spec_gap_Q_last' in history and history['spec_gap_Q_last']:
         datalast = history['spec_gap_Q_last']
         steplast = max(1, len(datalast) // 100)
-        plt.plot(datalast[::steplast], label='Layer Last Gap', color='#d35400', marker='o' if len(datalast) < 20 else None)
+        if steps is not None and len(steps) == len(datalast):
+            plt.plot(steps[::steplast], datalast[::steplast], label='Layer Last Gap', color='#d35400', marker='o' if len(datalast) < 20 else None)
+        else:
+            plt.plot(datalast[::steplast], label='Layer Last Gap', color='#d35400', marker='o' if len(datalast) < 20 else None)
+
     plt.title('Spectral Gap ($\sigma_1 / \sigma_2$): Signature of Singular Feature Focus')
-    plt.xlabel('Steps')
+    plt.xlabel('Training Steps')
     plt.ylabel('Gap Ratio')
     plt.legend()
     plt.savefig(os.path.join(save_dir, 'spectral_gap.png'), dpi=300)
@@ -149,6 +165,49 @@ def plot_results(history, save_dir):
         plt.ylabel('Value')
         plt.legend()
         plt.savefig(os.path.join(save_dir, 'singular_spectrum.png'), dpi=300)
+    plt.close()
+
+    # 6. Update-Weight Alignment (Geometric Lock-in)
+    plt.figure(figsize=(10, 6))
+    k_layers = sorted([int(lk.split('_')[-1]) for lk in history.keys() if lk.startswith('alignment_Q_') and lk.split('_')[-1].isdigit()])
+    last_idx = k_layers[-1] if k_layers else 0
+    
+    if f'alignment_Q_0' in history and history[f'alignment_Q_0']:
+        data0 = history[f'alignment_Q_0']
+        datalast = history[f'alignment_Q_{last_idx}']
+        steps = history.get('steps', list(range(len(data0))))
+        
+        # Downsample
+        step_sz = max(1, len(data0) // 100)
+        plt.plot(steps[::step_sz], data0[::step_sz], label='Layer 0 Alignment', color='#8e44ad', linewidth=2)
+        plt.plot(steps[::step_sz], datalast[::step_sz], label=f'Layer {last_idx} Alignment', color='#f39c12', linewidth=2)
+        
+        plt.title('Update-Weight Subspace Alignment (k=5)')
+        plt.xlabel('Training Steps')
+        plt.ylabel('Cosine Similarity (1.0 = Max Lock-in)')
+        plt.legend()
+        plt.grid(True, alpha=0.3)
+        plt.savefig(os.path.join(save_dir, 'update_alignment.png'), dpi=300)
+    plt.close()
+
+    # 7. Spectral Entropy Heatmap (Capacity Utilization)
+    plt.figure(figsize=(16, 5))
+    e_q = []
+    e_v = []
+    l_names = []
+    for i in k_layers:
+        if f'entropy_Q_{i}' in history:
+            e_q.append(history[f'entropy_Q_{i}'][-1])
+            e_v.append(history[f'entropy_V_{i}'][-1])
+            l_names.append(f"L{i}")
+            
+    if e_q and e_v:
+        heatmap_data = np.array([e_q, e_v])
+        sns.heatmap(heatmap_data, annot=True, fmt=".2f", cmap="magma", 
+                    xticklabels=l_names, yticklabels=['Query Entropy', 'Value Entropy'])
+        plt.title('Final Spectral Entropy: Capacity Utilization (0.0 = Low Rank, 1.0 = Full Rank)')
+        plt.tight_layout()
+        plt.savefig(os.path.join(save_dir, 'entropy_heatmap.png'), dpi=300)
     plt.close()
 
     print(f"Research plots successfully saved to {save_dir}/")

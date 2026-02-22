@@ -17,7 +17,12 @@ from models.llm import MinimalLLM
 from optimizers.muon import Muon
 from training.evaluation import evaluate_model
 from utils.helpers import set_seed, format_time
-from utils.spectral import compute_spectral_stats, compute_singular_values
+from utils.spectral import (
+    compute_spectral_stats, 
+    compute_singular_values,
+    compute_subspace_alignment,
+    compute_spectral_entropy
+)
 
 
 class EarlyStopping:
@@ -275,6 +280,20 @@ def train_model(
                             metrics_history['manifold_history'][f'spec_norm_Q_{i}'].append(q_stats['max'])
                             metrics_history['manifold_history'][f'spec_norm_K_{i}'].append(k_stats['max'])
                             metrics_history['manifold_history'][f'spec_norm_V_{i}'].append(v_stats['max'])
+                            
+                            # Log Spectral Entropy (Capacity Allocation)
+                            metrics_history['manifold_history'][f'entropy_Q_{i}'].append(compute_spectral_entropy(w_q))
+                            metrics_history['manifold_history'][f'entropy_V_{i}'].append(compute_spectral_entropy(w_v))
+
+                            # Log Update-Weight Alignment (Geometric Lock-in)
+                            muon_opt = optimizers[0]
+                            if proj in muon_opt.state and 'last_update' in muon_opt.state[proj]:
+                                delta_proj = muon_opt.state[proj]['last_update'].to(proj.device)
+                                delta_q = delta_proj[:q_size]
+                                delta_v = delta_proj[q_size + kv_size : q_size + 2 * kv_size]
+                                
+                                metrics_history['manifold_history'][f'alignment_Q_{i}'].append(compute_subspace_alignment(w_q, delta_q, k=5))
+                                metrics_history['manifold_history'][f'alignment_V_{i}'].append(compute_subspace_alignment(w_v, delta_v, k=5))
                             
                             # Track detailed stats for first and last layers
                             if i == 0 or i == num_layers - 1:

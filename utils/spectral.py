@@ -1,4 +1,5 @@
 import torch
+import math
 
 def compute_spectral_stats(tensor):
     """Computes spectral statistics of a 2D tensor on CPU to save VRAM."""
@@ -45,3 +46,46 @@ def compute_singular_values(tensor, n=10):
         if len(vals) < n:
             vals += [0.0] * (n - len(vals))
         return vals
+
+def compute_subspace_alignment(W, delta_W, k=5):
+    """
+    Measures how much the top-k singular directions of the update 
+    align with the top-k singular directions of the weight.
+    Returns: Average cosine of principal angles [0, 1]
+    """
+    with torch.no_grad():
+        # Handle 1D or skinny tensors
+        if W.ndim < 2 or W.size(0) < k or W.size(1) < k:
+            return 0.0
+            
+        W_2d = W.view(-1, W.size(-1)).detach().cpu().float()
+        dW_2d = delta_W.view(-1, delta_W.size(-1)).detach().cpu().float()
+        
+        # SVD for both (left singular vectors)
+        try:
+            U_w, _, _ = torch.linalg.svd(W_2d, full_matrices=False)
+            U_dw, _, _ = torch.linalg.svd(dW_2d, full_matrices=False)
+            
+            # Principal angles between top-k subspaces
+            M = U_w[:, :k].mT @ U_dw[:, :k]
+            cosines = torch.linalg.svdvals(M)
+            return cosines.mean().item()
+        except Exception:
+            return 0.0
+
+def compute_spectral_entropy(tensor):
+    """Computes Shannon entropy of the squared singular value distribution."""
+    with torch.no_grad():
+        if tensor.ndim < 2:
+            return 0.0
+        t = tensor.view(-1, tensor.size(-1)).detach().cpu().float()
+        s = torch.linalg.svdvals(t)
+        if len(s) == 0:
+            return 0.0
+            
+        p = (s**2) / (torch.sum(s**2) + 1e-10)
+        p = p[p > 1e-8] # Stability
+        entropy = -torch.sum(p * torch.log(p)).item()
+        # Normalize by max possible entropy (log of rank)
+        max_entropy = math.log(len(s)) if len(s) > 1 else 1.0
+        return entropy / max_entropy
