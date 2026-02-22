@@ -15,6 +15,25 @@ Our primary research direction is **Hierarchical Stretching**—the observation 
 
 ## 🚀 Getting Started
 
+### 0. Setup
+
+```bash
+pip install -r requirements.txt
+```
+
+Download dataset:
+```bash
+python3 -c "
+from datasets import load_dataset
+import os
+print('Downloading 1B Pretraining Data...')
+ds = load_dataset('vukrosic/blueberry-1B-pretrain')
+os.makedirs('processed_data/pretrain_1B', exist_ok=True)
+ds.save_to_disk('processed_data/pretrain_1B')
+print('✅ Full Data Ready!')
+"
+```
+
 ### 1. Training with Manifold Tracking
 To train a model while tracking its manifold evolution, use the `--track_manifold true` flag:
 

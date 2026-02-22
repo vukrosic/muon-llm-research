@@ -276,12 +276,19 @@ def train_model(
                             q_stats = compute_spectral_stats(w_q)
                             k_stats = compute_spectral_stats(w_k)
                             v_stats = compute_spectral_stats(w_v)
+                            o_stats = compute_spectral_stats(proj[block.attention.qkv_size:])
+                            
+                            up_stats = compute_spectral_stats(block.feed_forward.up_proj.weight)
+                            down_stats = compute_spectral_stats(block.feed_forward.down_proj.weight)
                             
                             metrics_history['manifold_history'][f'spec_norm_Q_{i}'].append(q_stats['max'])
                             metrics_history['manifold_history'][f'spec_norm_K_{i}'].append(k_stats['max'])
                             metrics_history['manifold_history'][f'spec_norm_V_{i}'].append(v_stats['max'])
+                            metrics_history['manifold_history'][f'spec_norm_O_{i}'].append(o_stats['max'])
+                            metrics_history['manifold_history'][f'spec_norm_Up_{i}'].append(up_stats['max'])
+                            metrics_history['manifold_history'][f'spec_norm_Down_{i}'].append(down_stats['max'])
                             
-                            # Log Spectral Entropy (Capacity Allocation)
+                            # Log Spectral Entropy (Capacity Allocation) for Q and V
                             metrics_history['manifold_history'][f'entropy_Q_{i}'].append(compute_spectral_entropy(w_q))
                             metrics_history['manifold_history'][f'entropy_V_{i}'].append(compute_spectral_entropy(w_v))
 

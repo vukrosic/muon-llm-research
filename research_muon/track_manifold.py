@@ -136,32 +136,63 @@ def plot_results(history, save_dir):
     plt.savefig(os.path.join(save_dir, 'spectral_gap.png'), dpi=300)
     plt.close()
 
-    # 4. Layer Norm Heatmap (Final Step)
-    # We expect keys like 'all_layers_Q_norm', 'all_layers_V_norm' which are lists of norms for each layer
-    plt.figure(figsize=(16, 5))
-    norm_matrix = []
+    # 4. Final Spectral Norm Distribution (Heatmap)
+    plt.figure(figsize=(18, 6))
+    q_norms, k_norms, v_norms, o_norms, up_norms, down_norms = [], [], [], [], [], []
     layer_names = []
     
-    # Collect all 'spec_norm_Q_i' available in the last history entry
-    q_norms = []
-    k_norms = []
-    v_norms = []
     k_layers = sorted([int(k.split('_')[-1]) for k in history.keys() if k.startswith('spec_norm_Q_') and k.split('_')[-1].isdigit()])
     
     for i in k_layers:
         q_norms.append(history[f'spec_norm_Q_{i}'][-1])
-        k_norms.append(history.get(f'spec_norm_K_{i}', [0])[-1]) # Fallback for old logs
+        k_norms.append(history.get(f'spec_norm_K_{i}', [0])[-1])
         v_norms.append(history[f'spec_norm_V_{i}'][-1])
-        layer_names.append(f"L{i}") # Shorter names for better fit
+        o_norms.append(history.get(f'spec_norm_O_{i}', [0])[-1])
+        up_norms.append(history.get(f'spec_norm_Up_{i}', [0])[-1])
+        down_norms.append(history.get(f'spec_norm_Down_{i}', [0])[-1])
+        layer_names.append(f"L{i}")
         
-    if q_norms and v_norms:
-        heatmap_data = np.array([q_norms, k_norms, v_norms])
+    if q_norms:
+        heatmap_data = np.array([q_norms, v_norms])
         sns.heatmap(heatmap_data, annot=True, fmt=".2f", cmap="YlGnBu", 
-                    xticklabels=layer_names, yticklabels=['Query', 'Key', 'Value'],
-                    annot_kws={"size": 7})
-        plt.title('Final Spectral Norm Distribution Across Layers')
+                    xticklabels=layer_names, yticklabels=['Query', 'Value'],
+                    annot_kws={"size": 8})
+        plt.title('Final Q & V Spectral Norm Distribution Across All Layers')
         plt.tight_layout()
         plt.savefig(os.path.join(save_dir, 'norm_heatmap.png'), dpi=300)
+    plt.close()
+
+    # 4b. Spectral Norm vs Depth (Scatter Plot)
+    plt.figure(figsize=(12, 6))
+    colors = {
+        'Q': '#e74c3c',   # Red
+        'V': '#2ecc71',   # Green
+    }
+    
+    for proj_type, color in colors.items():
+        norms = []
+        depths = []
+        for i in k_layers:
+            key = f'spec_norm_{proj_type}_{i}'
+            if key in history:
+                norms.append(history[key][-1])
+                depths.append(i)
+        
+        if norms:
+            plt.scatter(depths, norms, color=color, label=f'{proj_type} Proj', s=60, alpha=0.7, edgecolors='white')
+            # Add a trend line
+            if len(depths) > 1:
+                z = np.polyfit(depths, norms, 1)
+                p = np.poly1d(z)
+                plt.plot(depths, p(depths), color=color, linestyle='--', alpha=0.4)
+
+    plt.xlabel('Layer Index (Depth)')
+    plt.ylabel('Final Spectral Norm')
+    plt.title('Spectral Norm vs Depth by Projection Type')
+    plt.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
+    plt.grid(True, alpha=0.3)
+    plt.tight_layout()
+    plt.savefig(os.path.join(save_dir, 'spectral_norm_vs_depth.png'), dpi=300)
     plt.close()
 
     # 5. Top Singular Values (Final Step)
