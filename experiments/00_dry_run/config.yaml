@@ -1,0 +1,11 @@
+# Dry Run Config
+train_tokens: 1000000 
+optimizer_type: "muon"
+muon_lr: 0.02
+log_every: 10
+detailed_log_every: 10 # Log detailed metrics every 10 steps for dry run
+save_every: 1000
+compile_model: false
+track_manifold: true
+batch_size: 2
+gradient_accumulation_steps: 4

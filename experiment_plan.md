@@ -4,12 +4,18 @@ Here is my LLM research experiment plan:
 
 To start, I will train an 88M parameter LLM on 2B tokens of text data (compute constrains, my friends will scale this later)
 
+0. Code is already setup for Muon, quick leraning rate search for AdamW only training.
+
 1. I will start with 6 experiments, each one on 4090 GPU overnight
 - Muon optimizer vs AdamW optimizer
 - 3 seeds each to mitigate randomness
 
 
-I will plot some metrics and check if the metrics show weird or unexpected results.
+I will plot some metrics and check if the metrics show weird or unexpected results. For example:
+Why does layer 3 behave differently from layer 9?
+Why does rank collapse in AdamW happen at step X and not step Y?
+Why do Q projections differ from V projections?
+Is there a layer where Muon's entropy also drops? When? Why?
 
 Here are metrics from a quick debugging run, we can already see some things:
 
@@ -21,7 +27,6 @@ AdamW's weights' spectral norms are a lot bigger.
 | :--- | :--- |
 | ![Muon Spectral Norm](results/muon_2M/spectral_norm_vs_depth.png) | ![AdamW Spectral Norm](results/adamw_2M/spectral_norm_vs_depth.png) |
 
-This could mean that AdamW is picking a direction early. Unbounded growth in spectral norm can lead to gradient explosion or saturation of the model's expressive capacity. Muon keeps the weights near-orthonormal, which stabilizes signal propagation and ensures the effective learning rate doesn't vanish as weights grow.
 
 ### 2. Spectral Rank (Entropy)
 We measure "rank" using normalized Spectral Entropy, which quantifies the spread of the squared singular value distribution $p_i = \sigma_i^2 / \sum \sigma_j^2$:
@@ -50,3 +55,7 @@ $$ \text{Spectrum}(W) = \{ \sigma_1, \sigma_2, \dots, \sigma_d \} $$
 | :--- | :--- |
 | ![Muon Spectrum](results/muon_2M/singular_spectrum.png) | ![AdamW Spectrum](results/adamw_2M/singular_spectrum.png) |
 Muon maintains a remarkably flat spectrum compared to AdamW's "heavy-tailed" distribution, reflecting its orthogonalization property which prevents any single direction from dominating the weight updates.
+
+
+Phase 1: Confirm (what you're already doing)
+Do the plots differ between Muon and AdamW? Yes, in the ways you expect. Good. Sanity check passed. This is not publishable.

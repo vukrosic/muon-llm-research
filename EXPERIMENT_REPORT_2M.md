@@ -5,17 +5,17 @@ This experiment compared the **Muon** optimizer against **AdamW** for a 2M token
 
 | Metric | Muon | AdamW | Difference |
 | :--- | :--- | :--- | :--- |
-| **Final Val Loss** | **6.0748** | 6.9147 | -0.84 (Muon wins) |
-| **Final Val Accuracy** | **16.29%** | 10.10% | +6.19% |
-| **Training Time** | ~1m 54s | **~1m 01s** | AdamW is faster per step |
+| **Final Val Loss** | **6.0945** | 7.1168 | -1.02 (Muon wins) |
+| **Final Val Accuracy** | **16.17%** | 9.47% | +6.70% |
+| **Training Time** | ~1m 01s | **~52s** | AdamW is faster per step |
 
 ---
 
 ## 📈 Performance Comparison
 
 ### Validation Loss
-![Muon Loss Curve](plots/val_loss_muon_2000000_20260223_150649.png)
-![AdamW Loss Curve](plots/val_loss_adamw_2000000_20260223_150812.png)
+![Muon Loss Curve](plots/val_loss_muon_2000000_20260223_160132.png)
+![AdamW Loss Curve](plots/val_loss_adamw_2000000_20260223_160009.png)
 
 Muon demonstrated a significantly faster convergence rate in the early stages of training. By 2M tokens, Muon reached a validation loss that AdamW likely wouldn't reach for several more million tokens.
 

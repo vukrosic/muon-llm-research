@@ -32,7 +32,7 @@ class BlueberryConfig:
     # Learning Rate (Aggressive for pre-training)
     muon_lr: float = 0.024
     muon_momentum: float = 0.95
-    adamw_lr: float = 0.006
+    adamw_lr: float = 0.0005
     warmup_ratio: float = 0.0
     schedule_type: str = "constant"
     optimizer_type: str = "muon" # "muon" or "adamw"
@@ -48,10 +48,13 @@ class BlueberryConfig:
     grad_clip: float = 1.0
     use_amp: bool = True
     
-    # Logging
+    # Logging & Checkpoints
+    log_every: int = 100
+    save_every: int = 5000
+    track_manifold: bool = False
+    detailed_log_every: int = 500
     log_milestones: Tuple[int, ...] = (100, 500, 1000)
 
     def __post_init__(self):
         self.d_k = self.d_model // self.n_heads
         assert self.d_model % self.n_heads == 0, "d_model must be divisible by n_heads"
-

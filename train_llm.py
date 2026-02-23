@@ -5,6 +5,7 @@ import torch
 import logging
 import random
 import numpy as np
+import yaml
 from torch.utils.data import DataLoader
 
 # Fix tokenizer parallelism warning when using DataLoader workers
@@ -268,11 +269,12 @@ def main():
     print_system_info()
     set_seed(42)
     parser = argparse.ArgumentParser(description="Train MoE Model")
-    parser.add_argument("--muon_lr", type=float, help="Override Muon learning rate")
-    parser.add_argument("--adamw_lr", type=float, help="Override AdamW learning rate")
-    parser.add_argument("--train_tokens", type=int, default=20000000, help="Override train_tokens")
+    parser.add_argument("--muon_lr", type=float, default=None, help="Override Muon learning rate")
+    parser.add_argument("--adamw_lr", type=float, default=None, help="Override AdamW learning rate")
+    parser.add_argument("--train_tokens", type=int, default=None, help="Override train_tokens")
     parser.add_argument("--output_dir", type=str, default="./checkpoints", help="Output directory")
     parser.add_argument("--config_class", type=str, help="Python path to config class (e.g., configs.llm_config.BlueberryConfig)")
+    parser.add_argument("--config_yaml", type=str, help="Path to YAML config file")
     parser.add_argument("--load_checkpoint", type=str, help="Path to checkpoint file to load weights from")
     parser.add_argument("--compile", type=str, help="Whether to compile the model (true/false)")
     parser.add_argument("--dataset_path", type=str, help="Path to preprocessed dataset directory")
@@ -286,11 +288,24 @@ def main():
     parser.add_argument("--resume", action="store_true", help="Resume training from latest_checkpoint.pt in the output directory")
     parser.add_argument("--checkpoint_dir", type=str, default="./checkpoints", help="Directory to save periodic checkpoints")
     parser.add_argument("--optimizer", type=str, help="Optimizer type (muon or adamw)")
+    parser.add_argument("--raw_metrics_dir", type=str, help="Directory to save JSONL raw metrics")
 
     args = parser.parse_args()
 
     # Load Config
-    if args.config_class:
+    if args.config_yaml:
+        import yaml
+        from configs.llm_config import BlueberryConfig # Assuming BlueberryConfig is a default base
+        print(f"Loading config from YAML: {args.config_yaml}")
+        with open(args.config_yaml, 'r') as f:
+            yaml_cfg = yaml.safe_load(f)
+        config = BlueberryConfig() # Initialize with a default config to ensure all attributes exist
+        for k, v in yaml_cfg.items():
+            if hasattr(config, k):
+                setattr(config, k, v)
+            else:
+                print(f"Warning: Config has no attribute '{k}' from YAML file. Skipping.")
+    elif args.config_class:
         import importlib
         try:
             module_name, class_name = args.config_class.rsplit(".", 1)
@@ -303,6 +318,7 @@ def main():
             raise e
     else:
         # Default to the optimized Pow2 config
+        from configs.llm_config import BlueberryConfig
         config = BlueberryConfig()
 
     # Override config with args
@@ -433,7 +449,8 @@ def main():
         load_weights_path=args.load_checkpoint,
         track_manifold=(args.track_manifold.lower() == "true"),
         resume=args.resume,
-        checkpoint_dir=args.checkpoint_dir
+        checkpoint_dir=args.checkpoint_dir,
+        raw_metrics_dir=args.raw_metrics_dir
     )
 
 

@@ -107,8 +107,8 @@ def setup_muon_optimizer(model: nn.Module, config: BlueberryConfig):
     return optimizers
 
 
-def log_detailed_metrics(model, optimizers, step, tokens_seen, metrics_history):
-    """Logs detailed metrics per layer and projection every 500 steps."""
+def log_detailed_metrics(model, optimizers, step, tokens_seen, metrics_history, raw_metrics_dir=None):
+    """Logs detailed metrics per layer and projection every N steps."""
     device = next(model.parameters()).device
     model_to_log = model.module if hasattr(model, 'module') else model # Handle DDP/Compile
     
@@ -121,6 +121,10 @@ def log_detailed_metrics(model, optimizers, step, tokens_seen, metrics_history):
         'layers': []
     }
     
+    jsonl_norms = []
+    jsonl_alignment = []
+    jsonl_singular = []
+
     with torch.no_grad():
         for i, block in enumerate(model_to_log.transformer_blocks):
             layer_data = {'layer': i, 'projections': {}}
@@ -130,12 +134,14 @@ def log_detailed_metrics(model, optimizers, step, tokens_seen, metrics_history):
             q_size = block.attention.q_size
             kv_size = block.attention.kv_size
             
-            # Sub-projections
+            # Projections to track
             projs = {
-                'Q': proj_param[:q_size],
-                'K': proj_param[q_size : q_size + kv_size],
-                'V': proj_param[q_size + kv_size : q_size + 2 * kv_size],
-                'O': proj_param[q_size + 2 * kv_size:]
+                'q': proj_param[:q_size],
+                'k': proj_param[q_size : q_size + kv_size],
+                'v': proj_param[q_size + kv_size : q_size + 2 * kv_size],
+                'o': proj_param[q_size + 2 * kv_size:],
+                'up': block.feed_forward.up_proj.weight,
+                'down': block.feed_forward.down_proj.weight
             }
             
             for name, W in projs.items():
@@ -145,26 +151,37 @@ def log_detailed_metrics(model, optimizers, step, tokens_seen, metrics_history):
                 stats['weight_norm'] = torch.norm(W).item()
                 
                 # Gradient norm (if exists)
-                if proj_param.grad is not None:
-                    # Need to slice the grad too
-                    if name == 'Q': G = proj_param.grad[:q_size]
-                    elif name == 'K': G = proj_param.grad[q_size : q_size + kv_size]
-                    elif name == 'V': G = proj_param.grad[q_size + kv_size : q_size + 2 * kv_size]
-                    else: G = proj_param.grad[q_size + 2 * kv_size:]
-                    stats['grad_norm'] = torch.norm(G).item()
+                # For merged QKVO, we need to slice the grad
+                if name in ['q', 'k', 'v', 'o']:
+                    param_grad = proj_param.grad
+                    if param_grad is not None:
+                        if name == 'q': G = param_grad[:q_size]
+                        elif name == 'k': G = param_grad[q_size : q_size + kv_size]
+                        elif name == 'v': G = param_grad[q_size + kv_size : q_size + 2 * kv_size]
+                        else: G = param_grad[q_size + 2 * kv_size:]
+                        stats['grad_norm'] = torch.norm(G).item()
+                    else:
+                        stats['grad_norm'] = 0.0
                 else:
-                    stats['grad_norm'] = 0.0
+                    # MLP projections
+                    W_param = block.feed_forward.up_proj.weight if name == 'up' else block.feed_forward.down_proj.weight
+                    stats['grad_norm'] = torch.norm(W_param.grad).item() if W_param.grad is not None else 0.0
                     
                 # Update norm and alignment
                 # Find which optimizer has this parameter
                 update_found = False
+                target_param = proj_param if name in ['q', 'k', 'v', 'o'] else (block.feed_forward.up_proj.weight if name == 'up' else block.feed_forward.down_proj.weight)
+                
                 for opt in optimizers:
-                    if proj_param in opt.state and 'last_update' in opt.state[proj_param]:
-                        delta_proj = opt.state[proj_param]['last_update'].to(W.device)
-                        if name == 'Q': dW = delta_proj[:q_size]
-                        elif name == 'K': dW = delta_proj[q_size : q_size + kv_size]
-                        elif name == 'V': dW = delta_proj[q_size + kv_size : q_size + 2 * kv_size]
-                        else: dW = delta_proj[q_size + 2 * kv_size:]
+                    if target_param in opt.state and 'last_update' in opt.state[target_param]:
+                        delta_full = opt.state[target_param]['last_update'].to(W.device)
+                        if name in ['q', 'k', 'v', 'o']:
+                            if name == 'q': dW = delta_full[:q_size]
+                            elif name == 'k': dW = delta_full[q_size : q_size + kv_size]
+                            elif name == 'v': dW = delta_full[q_size + kv_size : q_size + 2 * kv_size]
+                            else: dW = delta_full[q_size + 2 * kv_size:]
+                        else:
+                            dW = delta_full
                         
                         stats['update_norm'] = torch.norm(dW).item()
                         stats['alignment'] = compute_subspace_alignment(W, dW, k=5)
@@ -182,10 +199,29 @@ def log_detailed_metrics(model, optimizers, step, tokens_seen, metrics_history):
                 stats['singular_values'] = compute_full_singular_values(W)
                 
                 layer_data['projections'][name] = stats
+                
+                # Prepare JSONL entries
+                base_info = {'step': step, 'tokens': tokens_seen, 'layer': i, 'proj': name}
+                jsonl_norms.append({**base_info, 'grad_norm': stats['grad_norm'], 'weight_norm': stats['weight_norm'], 'update_norm': stats['update_norm'], 'effective_rank': stats['effective_rank']})
+                jsonl_alignment.append({**base_info, 'alignment': stats['alignment']})
+                jsonl_singular.append({**base_info, 'singular_values': stats['singular_values']})
             
             log_entry['layers'].append(layer_data)
             
     metrics_history['layer_logs'].append(log_entry)
+    
+    # Write to JSONL if directory provided
+    if raw_metrics_dir:
+        os.makedirs(raw_metrics_dir, exist_ok=True)
+        def append_jsonl(path, entries):
+            with open(path, 'a') as f:
+                for entry in entries:
+                    f.write(json.dumps(entry) + '\n')
+        
+        append_jsonl(os.path.join(raw_metrics_dir, 'norms.jsonl'), jsonl_norms)
+        append_jsonl(os.path.join(raw_metrics_dir, 'alignment.jsonl'), jsonl_alignment)
+        append_jsonl(os.path.join(raw_metrics_dir, 'singular_values.jsonl'), jsonl_singular)
+        
     print(f"   📊 Logged detailed metrics at step {step}")
 
 
@@ -204,6 +240,8 @@ def train_model(
     checkpoint_dir: Optional[str] = "checkpoints",
     checkpoint_every: int = 5000,
     resume_from: Optional[str] = None,
+    raw_metrics_dir: Optional[str] = None,
+    checkpoint_token_milestone: int = 500_000,
 ) -> Any:
     """
     Generic training function that can be used by experiments.
@@ -335,7 +373,7 @@ def train_model(
                 
                 # Capture updates for AdamW comparison and research tracking
                 opt_step = (step + 1) // config.gradient_accumulation_steps
-                is_logging_step = (opt_step > 0 and opt_step % 500 == 0)
+                is_logging_step = (opt_step > 0 and opt_step % config.detailed_log_every == 0)
                 # Capture updates if we are about to log Detailed Metrics OR Manifold Tracking
                 is_manifold_step = track_manifold and (step % log_every == 0)
                 needs_update_capture = is_logging_step or is_manifold_step
@@ -359,7 +397,7 @@ def train_model(
                 
                 # Perform detailed logging before zeroing gradients
                 if is_logging_step:
-                    log_detailed_metrics(model, optimizers, opt_step, tokens_seen, metrics_history)
+                    log_detailed_metrics(model, optimizers, opt_step, tokens_seen, metrics_history, raw_metrics_dir=raw_metrics_dir)
 
                 # Zero gradients after logging
                 for optimizer in optimizers:
@@ -509,11 +547,20 @@ def train_model(
                         stopped_early = True
                         break
 
-            # Save periodic checkpoint
-            if checkpoint_dir and step > 0 and step % checkpoint_every == 0:
+            # Save periodic checkpoint (both step-based and token-based)
+            is_token_milestone = (tokens_seen // checkpoint_token_milestone) > ((tokens_seen - batch_tokens) // checkpoint_token_milestone)
+            is_step_milestone = (checkpoint_every > 0 and step > 0 and step % checkpoint_every == 0)
+            
+            if checkpoint_dir and (is_token_milestone or is_step_milestone):
                 ckpt_dir = Path(checkpoint_dir)
                 ckpt_dir.mkdir(parents=True, exist_ok=True)
-                ckpt_path = ckpt_dir / "latest_checkpoint.pt"
+                
+                if is_token_milestone:
+                    milestone_gb = (tokens_seen // checkpoint_token_milestone) * checkpoint_token_milestone // 1_000_000
+                    ckpt_path = ckpt_dir / f"step_{step}_{milestone_gb}M_tokens.pt"
+                    print(f"   💾 Token-based checkpoint saved at {tokens_seen:,} tokens")
+                else:
+                    ckpt_path = ckpt_dir / "latest_checkpoint.pt"
                 
                 # We save a minimal set needed for resuming
                 torch.save({
@@ -524,7 +571,16 @@ def train_model(
                     'scheduler_states': [sch.state_dict() for sch in schedulers] if schedulers else [],
                     'metrics_history': metrics_history,
                 }, ckpt_path)
-                # print(f"   💾 Checkpoint saved at step {step}")
+                
+                # Always update latest_checkpoint.pt if it was a step milestone or just to be safe
+                torch.save({
+                    'step': step,
+                    'tokens_seen': tokens_seen,
+                    'model_state_dict': model.state_dict(),
+                    'optimizer_states': [opt.state_dict() for opt in optimizers],
+                    'scheduler_states': [sch.state_dict() for sch in schedulers] if schedulers else [],
+                    'metrics_history': metrics_history,
+                }, ckpt_dir / "latest_checkpoint.pt")
 
             step += 1
         
@@ -710,6 +766,7 @@ def train_minimal_llm(
     track_manifold: bool = False,
     resume: bool = False,
     checkpoint_dir: str = "checkpoints",
+    raw_metrics_dir: Optional[str] = None,
 ):
     print(f"\n🚀 Training dense model")
     setup_start = time.time()
@@ -838,7 +895,8 @@ def train_minimal_llm(
         track_manifold=track_manifold,
         resume_from=os.path.join(checkpoint_dir, "latest_checkpoint.pt") if resume else None,
         checkpoint_dir=checkpoint_dir,
-        checkpoint_every=getattr(config, 'save_every', 2000)
+        checkpoint_every=getattr(config, 'save_every', 2000),
+        raw_metrics_dir=raw_metrics_dir
     )
     
     total_training_time = results['training_time']
