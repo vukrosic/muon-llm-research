@@ -51,27 +51,36 @@ def compute_subspace_alignment(W, delta_W, k=5):
     """
     Measures how much the top-k singular directions of the update 
     align with the top-k singular directions of the weight.
-    Returns: Average cosine of principal angles [0, 1]
+    Returns: (left_alignment, right_alignment) - Average cosine of principal angles [0, 1]
     """
     with torch.no_grad():
         # Handle 1D or skinny tensors
         if W.ndim < 2 or W.size(0) < k or W.size(1) < k:
-            return 0.0
+            return 0.0, 0.0
             
         W_2d = W.view(-1, W.size(-1)).detach().cpu().float()
         dW_2d = delta_W.view(-1, delta_W.size(-1)).detach().cpu().float()
         
-        # SVD for both (left singular vectors)
+        # SVD for both (left and right singular vectors)
         try:
-            U_w, _, _ = torch.linalg.svd(W_2d, full_matrices=False)
-            U_dw, _, _ = torch.linalg.svd(dW_2d, full_matrices=False)
+            U_w, _, V_w = torch.linalg.svd(W_2d, full_matrices=False)
+            U_dw, _, V_dw = torch.linalg.svd(dW_2d, full_matrices=False)
             
-            # Principal angles between top-k subspaces
-            M = U_w[:, :k].mT @ U_dw[:, :k]
-            cosines = torch.linalg.svdvals(M)
-            return cosines.mean().item()
+            # Principal angles between top-k subspaces (left/output subspace)
+            M_left = U_w[:, :k].mT @ U_dw[:, :k]
+            cosines_left = torch.linalg.svdvals(M_left)
+            left_align = cosines_left.mean().item()
+            
+            # Principal angles between top-k subspaces (right/input subspace)
+            # V_w shape is (K, N) where K is min(M,N), N is width. V_w.mT is (N, K).
+            # The top-k right singular vectors are the first k rows of V (or cols of V.mT).
+            M_right = V_w[:k, :] @ V_dw[:k, :].mT
+            cosines_right = torch.linalg.svdvals(M_right)
+            right_align = cosines_right.mean().item()
+            
+            return left_align, right_align
         except Exception:
-            return 0.0
+            return 0.0, 0.0
 
 def compute_spectral_entropy(tensor):
     """Computes Shannon entropy of the squared singular value distribution."""

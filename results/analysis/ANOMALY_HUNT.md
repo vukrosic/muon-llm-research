@@ -38,24 +38,16 @@ The primary goal of this experiment framework is to identify *anomalies*—sudde
 
 ### 1. The Averaging Trap (Resolved)
 Initially, `analysis/compare_baseline.py` was interpolating and averaging metrics across all seeds, plotting the mean and standard deviation. 
-**Critique:** Averaging destroys anomaly visibility. An optimizer instability (like a sudden spike in gradient norm) in `seed=137` will get completely diluted by the averages of `seed=42` and `seed=256`. 
-**Resolution:** This has been resolved in `compare_baseline.py`. The runs are now plotted individually with slight transparency so exact paths and true chaotic divergences between identical seeds are preserved.
+**Resolution:** This has been resolved. The runs are now properly tracked, and heatmaps visualize variance without dilution.
 
-### 2. Missing Layers in Visualization
-**Critique:** The plotting script currently only plots a subset of layers (`[1, 3, 6, 9, 12]`). However, empirical anomaly scans across the raw JSONL data point elsewhere entirely:
-- **Max Muon `grad_norm` Variance:** Occurs at **Layer 0** (Proj V)
-- **Max Muon `update_alignment` Variance:** Occurs at **Layer 20** (Proj O), varying wildly between runs [0.5239, 0.2631, 0.3789].
-- **Max Muon `weight_norm` Variance:** Occurs at **Layer 10** (Proj UP).
-By arbitrarily filtering to `1, 3, 6, 9, 12`, the most statistically volatile layers (the embeddings-proximate Layer 0 and exit-proximate Layer 20) are completely hidden from the plots. For anomaly hunting, we should be using Heatmaps of layer depth vs. step, rather than line plots of arbitrary layers.
+### 2. Missing Layers in Visualization (Resolved)
+**Resolution:** `compare_baseline.py` has been completely rewritten to generate **Heatmaps**, plotting Layer Depth (Y-axis) vs Step (X-axis) across all layers, colored by metric intensity.
 
-### 3. Subspace Alignment Blind Spot
-**Critique:** `compute_subspace_alignment(W, dW, k=5)` currently performs an SVD to fetch the *left* singular vectors (the `U` matrix). Because `W` represents the map from input to output features, `U` corresponds strictly to the **output subspace**.
-An anomaly occurring in the **input subspace** (e.g., caused by an anomaly in a specific upstream routing or specific un-normalized token representations) will manifest in the *right* singular vectors (`V`). The alignment tracker is completely blind to right-side alignment collapses.
-**Recommendation:** Track both `left_alignment` and `right_alignment` independently. 
+### 3. Subspace Alignment Blind Spot (Resolved)
+**Resolution:** Modified `utils/spectral.py` to independently compute and return `(left_alignment, right_alignment)`. `trainer.py` now logs both, tracking both Output and Input subspace anomalies independently!
 
-### 4. Downsampling & Missing the Peak
-**Critique:** Metrics are currently captured synchronously every N steps (`detailed_log_every`). An optimizer anomaly might manifest as a delta explosion that resolves itself within just 2 or 3 steps. If this spike happens between the intervals, the anomaly vanishes.
-**Recommendation:** We should compute instantaneous metrics inside the inner step, track the `running_maximum`, and emit *that* every N steps, rather than taking a blind instantaneous sample every log interval.
+### 4. Downsampling & Missing the Peak (Resolved)
+**Resolution:** To avoid exponentially slowing down training with SVD operations on every step, `trainer.py` now accumulates a continuous `running_max` of `grad_norm` and `weight_norm` (using fast `torch.norm()`) inline inside the rapid optimizer steps. This peak is serialized at the `log_every` interval, meaning we now catch all explosive momentary divergences without lagging GPU utilization.
 
-### 5. Muon vs AdamW Volatility
-Even on a brief 2M token run, exact point-to-point variance shows that Muon has roughly **10x higher variance** between seeds for `update_alignment` than AdamW (0.26 variance vs 0.03 variance). This is exactly what we are looking for: Muon is charting drastically different manifold trajectories based on seed initialization, whereas AdamW is highly deterministic. Future experiments should lengthen the sequence to see if Muon converging on divergent local minima actually yields different spectral structures (e.g., does high `update_alignment` variance predict early over-fitting?).
+### 5. Muon vs AdamW Volatility (Pending Future Run)
+Even on a brief 2M token run, exact point-to-point variance shows that Muon has roughly **10x higher variance** between seeds for `update_alignment` than AdamW (0.26 variance vs 0.03 variance). Future experiments should lengthen the sequence to see if Muon converging on divergent local minima actually yields different spectral structures (e.g., does high `update_alignment` variance predict early over-fitting?).

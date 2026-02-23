@@ -107,7 +107,7 @@ def setup_muon_optimizer(model: nn.Module, config: ModelConfig):
     return optimizers
 
 
-def log_detailed_metrics(model, optimizers, step, tokens_seen, metrics_history, raw_metrics_dir=None):
+def log_detailed_metrics(model, optimizers, step, tokens_seen, metrics_history, running_max_stats=None, raw_metrics_dir=None):
     """Logs detailed metrics per layer and projection every N steps."""
     device = next(model.parameters()).device
     model_to_log = model.module if hasattr(model, 'module') else model # Handle DDP/Compile
@@ -153,7 +153,8 @@ def log_detailed_metrics(model, optimizers, step, tokens_seen, metrics_history, 
                     stats['grad_norm'] = torch.norm(W_param.grad).item() if W_param.grad is not None else 0.0
                     
                 # Update norm and alignment
-                update_alignment = 0.0
+                left_alignment = 0.0
+                right_alignment = 0.0
                 update_found = False
                 target_param = proj_param if name in ['q', 'k', 'v', 'o'] else (block.feed_forward.up_proj.weight if name == 'up' else block.feed_forward.down_proj.weight)
                 
@@ -168,7 +169,7 @@ def log_detailed_metrics(model, optimizers, step, tokens_seen, metrics_history, 
                         else:
                             dW = delta_full
                         
-                        update_alignment = compute_subspace_alignment(W, dW, k=5)
+                        left_alignment, right_alignment = compute_subspace_alignment(W, dW, k=5)
                         update_found = True
                         break
                 
@@ -177,14 +178,26 @@ def log_detailed_metrics(model, optimizers, step, tokens_seen, metrics_history, 
                 
                 # Prepare flat record as requested
                 # We also keep effective_rank as it's useful and cheap
+                final_grad_norm = float(stats['grad_norm'])
+                final_weight_norm = float(stats['weight_norm'])
+                if running_max_stats is not None:
+                    key = f"{i}_{name}"
+                    if key in running_max_stats:
+                        final_grad_norm = max(final_grad_norm, running_max_stats[key]['grad_norm'])
+                        final_weight_norm = max(final_weight_norm, running_max_stats[key]['weight_norm'])
+                        # Reset for next interval
+                        running_max_stats[key] = {'grad_norm': 0.0, 'weight_norm': 0.0}
+
                 record = {
                     "step": step,
                     "layer": i,
                     "proj": name,
                     "singular_values": sigma,
-                    "update_alignment": float(update_alignment),
-                    "grad_norm": float(stats['grad_norm']),
-                    "weight_norm": float(stats['weight_norm']),
+                    "update_alignment": float(left_alignment),
+                    "left_alignment": float(left_alignment),
+                    "right_alignment": float(right_alignment),
+                    "grad_norm": final_grad_norm,
+                    "weight_norm": final_weight_norm,
                     "effective_rank": compute_effective_rank(W)
                 }
                 
@@ -270,6 +283,8 @@ def train_model(
     
     if track_manifold:
         metrics_history['manifold_history'] = []
+
+    running_max_stats = defaultdict(lambda: {'grad_norm': 0.0, 'weight_norm': 0.0})
 
     # Resume from checkpoint if specified
     start_step = 0
@@ -384,7 +399,43 @@ def train_model(
                 
                 # Perform detailed logging before zeroing gradients
                 if is_logging_step:
-                    log_detailed_metrics(model, optimizers, step, tokens_seen, metrics_history, raw_metrics_dir=raw_metrics_dir)
+                    log_detailed_metrics(model, optimizers, step, tokens_seen, metrics_history, running_max_stats=running_max_stats, raw_metrics_dir=raw_metrics_dir)
+
+                # Track running max stats between logs
+                if track_manifold:
+                    with torch.no_grad():
+                        model_to_log = model.module if hasattr(model, 'module') else model
+                        for i, block in enumerate(model_to_log.transformer_blocks):
+                            proj_param = block.attention.qkvo_proj
+                            q_size = block.attention.q_size
+                            kv_size = block.attention.kv_size
+                            projs = {
+                                'q': proj_param[:q_size],
+                                'k': proj_param[q_size : q_size + kv_size],
+                                'v': proj_param[q_size + kv_size : q_size + 2 * kv_size],
+                                'o': proj_param[q_size + 2 * kv_size:],
+                                'up': block.feed_forward.up_proj.weight,
+                                'down': block.feed_forward.down_proj.weight
+                            }
+                            for name, W in projs.items():
+                                key = f"{i}_{name}"
+                                W_norm = torch.norm(W).item()
+                                if name in ['q', 'k', 'v', 'o']:
+                                    param_grad = proj_param.grad
+                                    if param_grad is not None:
+                                        if name == 'q': G = param_grad[:q_size]
+                                        elif name == 'k': G = param_grad[q_size : q_size + kv_size]
+                                        elif name == 'v': G = param_grad[q_size + kv_size : q_size + 2 * kv_size]
+                                        else: G = param_grad[q_size + 2 * kv_size:]
+                                        G_norm = torch.norm(G).item()
+                                    else:
+                                        G_norm = 0.0
+                                else:
+                                    W_param = block.feed_forward.up_proj.weight if name == 'up' else block.feed_forward.down_proj.weight
+                                    G_norm = torch.norm(W_param.grad).item() if W_param.grad is not None else 0.0
+                                
+                                running_max_stats[key]['grad_norm'] = max(running_max_stats[key]['grad_norm'], G_norm)
+                                running_max_stats[key]['weight_norm'] = max(running_max_stats[key]['weight_norm'], W_norm)
 
                 # Track current loss (once per update is enough for these scalars)
                 current_loss_val = ce_loss.item()

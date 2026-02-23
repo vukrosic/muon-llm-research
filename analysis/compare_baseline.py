@@ -46,59 +46,64 @@ def get_experiment_data(exp_dir):
             
     return records
 
-def plot_grid(all_data, metric='entropy'):
-    # all_data is a dict: { 'muon': [ [run1_records], [run2_records], ... ], 'adamw': [...] }
+def plot_heatmaps(all_data, metric='entropy'):
+    # all_data: {'muon': {42: {...}}, 'adamw': {42: {...}}}
     
-    layers_to_plot = [1, 3, 6, 9, 12]
-    projections = ['q', 'k', 'v', 'o']
+    # We will plot one figure per optimizer.
+    # The figure will have rows=projections, cols=seeds
+    projections = ['q', 'k', 'v', 'o', 'up', 'down']
+    opts = list(all_data.keys())
     
-    fig, axes = plt.subplots(len(layers_to_plot), len(projections), figsize=(20, 15), sharex=True)
-    
-    colors = {'muon': 'blue', 'adamw': 'red'}
-    
-    for r_idx, layer in enumerate(layers_to_plot):
-        for c_idx, proj in enumerate(projections):
-            ax = axes[r_idx, c_idx]
-            
-            for opt, runs in all_data.items():
-                run_values = [] # List of (steps, values) tuples
+    for opt in opts:
+        seeds = list(all_data[opt].keys())
+        if not seeds: continue
+        
+        fig, axes = plt.subplots(len(projections), len(seeds), figsize=(5 * len(seeds), 4 * len(projections)))
+        
+        for r_idx, proj in enumerate(projections):
+            for c_idx, seed in enumerate(seeds):
+                ax = axes[r_idx, c_idx] if len(projections) > 1 else (axes[c_idx] if len(seeds) > 1 else axes)
                 
-                for records in runs:
-                    filtered = [r for r in records if r.get('layer') == layer and r.get('proj', '').lower() == proj]
-                    if not filtered: continue
-                    filtered.sort(key=lambda x: x['step'])
-                    steps = [r['step'] for r in filtered]
-                    values = [r.get(metric, 0) for r in filtered]
-                    run_values.append((steps, values))
+                # Build heatmap matrix: (layers, steps)
+                records_dict = all_data[opt][seed]
+                if not records_dict: continue
                 
-                if not run_values: continue
+                # Extract unique steps and layers
+                steps = sorted(list(set([k[0] for k in records_dict.keys()])))
+                layers = sorted(list(set([k[1] for k in records_dict.keys()])))
                 
-                for i, (steps, vals) in enumerate(run_values):
-                    label = opt.upper() if i == 0 else None
-                    ax.plot(steps, vals, color=colors[opt], alpha=0.6, linewidth=1.5, label=label)
-            
-            if r_idx == 0:
-                ax.set_title(f"Projection: {proj.upper()}", fontsize=14)
-            if c_idx == 0:
-                ax.set_ylabel(f"Layer {layer}\n{metric.capitalize()}", fontsize=12)
-            
-            if r_idx == len(layers_to_plot) - 1:
-                ax.set_xlabel("Step")
+                if not steps or not layers: continue
                 
-            if r_idx == 0 and c_idx == 0:
-                ax.legend()
+                heatmap = np.zeros((len(layers), len(steps)))
+                for sid, s in enumerate(steps):
+                    for lid, l in enumerate(layers):
+                        key = (s, l, proj)
+                        if key in records_dict:
+                            heatmap[lid, sid] = records_dict[key].get(metric, 0)
+                            
+                im = ax.imshow(heatmap, aspect='auto', origin='lower', cmap='viridis', 
+                          extent=[steps[0], steps[-1], layers[0], layers[-1]])
+                fig.colorbar(im, ax=ax)
                 
-    plt.tight_layout()
-    os.makedirs("results/analysis", exist_ok=True)
-    plt.savefig(f"results/analysis/baseline_comparison_{metric}.png")
-    print(f"Saved plot to results/analysis/baseline_comparison_{metric}.png")
+                if r_idx == 0:
+                    ax.set_title(f"{opt.upper()} (Seed {seed})", fontsize=14)
+                if c_idx == 0:
+                    ax.set_ylabel(f"Proj {proj.upper()}\nLayer Depth", fontsize=12)
+                if r_idx == len(projections) - 1:
+                    ax.set_xlabel("Step")
+                    
+        plt.tight_layout()
+        os.makedirs("results/analysis", exist_ok=True)
+        plt.savefig(f"results/analysis/heatmap_{opt}_{metric}.png")
+        plt.close(fig)
+        print(f"Saved {opt} heatmap to results/analysis/heatmap_{opt}_{metric}.png")
 
 def main():
     base_path = Path("experiments/01_muon_vs_adamw_baseline")
     opts = ['muon', 'adamw']
     seeds = [42, 137, 256]
     
-    all_data = {'muon': [], 'adamw': []}
+    all_data = {'muon': {}, 'adamw': {}}
     
     for opt in opts:
         for seed in seeds:
@@ -106,16 +111,17 @@ def main():
             print(f"Loading {exp_dir}...")
             data = get_experiment_data(exp_dir)
             if data:
-                all_data[opt].append(data)
+                all_data[opt][seed] = {(r['step'], r['layer'], r['proj']): r for r in data}
                 
-    if not all_data['muon'] and not all_data['adamw']:
+    if not any(all_data['muon'].values()) and not any(all_data['adamw'].values()):
         print("No data found to plot. Ensure experiments completed.")
         return
 
-    for metric in ['entropy', 'update_alignment', 'grad_norm', 'weight_norm', 'effective_rank']:
-        print(f"Plotting grid for {metric}...")
+    metrics = ['entropy', 'update_alignment', 'left_alignment', 'right_alignment', 'grad_norm', 'weight_norm', 'effective_rank']
+    for metric in metrics:
+        print(f"Plotting heatmaps for {metric}...")
         try:
-            plot_grid(all_data, metric=metric)
+            plot_heatmaps(all_data, metric=metric)
         except Exception as e:
             print(f"Failed to plot {metric}: {e}")
 
