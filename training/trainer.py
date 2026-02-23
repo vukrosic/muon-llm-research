@@ -5,7 +5,6 @@ import torch.nn.functional as F
 import math
 import time
 import json
-import json
 from pathlib import Path
 from torch.utils.data import DataLoader
 from torch.amp import autocast
@@ -57,23 +56,31 @@ class EarlyStopping:
 def setup_muon_optimizer(model: nn.Module, config: BlueberryConfig):
     """Setup Muon optimizer with hybrid approach or pure AdamW"""
     muon_params = []
-    adamw_params = []
+    
+    # AdamW groups
+    decay_params = []
+    no_decay_params = []
 
     opt_type = getattr(config, 'optimizer_type', 'muon')
 
     for name, param in model.named_parameters():
         if not param.requires_grad:
             continue
-            
-        if opt_type == 'muon':
-            if (param.ndim == 2 and 
-                'token_embedding' not in name and 
-                'norm' not in name):
-                muon_params.append(param)
-            else:
-                adamw_params.append(param)
+        
+        # Determine if it should be Muon-optimized
+        # Embedding and norms/biases are always AdamW/no-decay
+        is_embedding = 'token_embedding' in name or 'lm_head' in name
+        is_norm = 'norm' in name
+        
+        if opt_type == 'muon' and param.ndim == 2 and not is_embedding and not is_norm:
+            muon_params.append(param)
         else:
-            adamw_params.append(param)
+            # AdamW path: split into decay and no_decay groups
+            # We decay parameters that are at least 2D and NOT embeddings or norms
+            if param.ndim >= 2 and not is_embedding and not is_norm:
+                decay_params.append(param)
+            else:
+                no_decay_params.append(param)
 
     optimizers = []
     if muon_params:
@@ -81,12 +88,18 @@ def setup_muon_optimizer(model: nn.Module, config: BlueberryConfig):
         muon_optimizer = Muon(muon_params, lr=config.muon_lr, momentum=config.muon_momentum)
         optimizers.append(muon_optimizer)
         
-    if adamw_params:
-        print(f"  AdamW parameters: {sum(p.numel() for p in adamw_params):,}")
+    if decay_params or no_decay_params:
+        print(f"  AdamW parameters: {sum(p.numel() for p in decay_params) + sum(p.numel() for p in no_decay_params):,}")
+        print(f"    Decay: {len(decay_params)} tensors, No-Decay: {len(no_decay_params)} tensors")
+        
+        param_groups = [
+            {"params": decay_params, "weight_decay": config.weight_decay},
+            {"params": no_decay_params, "weight_decay": 0.0},
+        ]
+        
         adamw_optimizer = torch.optim.AdamW(
-            adamw_params,
+            param_groups,
             lr=config.adamw_lr,
-            weight_decay=config.weight_decay,
             fused=torch.cuda.is_available()
         )
         optimizers.append(adamw_optimizer)
@@ -320,12 +333,15 @@ def train_model(
             if (step + 1) % config.gradient_accumulation_steps == 0:
                 torch.nn.utils.clip_grad_norm_(model.parameters(), config.grad_clip)
                 
-                # Capture updates for AdamW comparison every 500 optimization steps
+                # Capture updates for AdamW comparison and research tracking
                 opt_step = (step + 1) // config.gradient_accumulation_steps
                 is_logging_step = (opt_step > 0 and opt_step % 500 == 0)
+                # Capture updates if we are about to log Detailed Metrics OR Manifold Tracking
+                is_manifold_step = track_manifold and (step % log_every == 0)
+                needs_update_capture = is_logging_step or is_manifold_step
                 
                 for optimizer in optimizers:
-                    if is_logging_step and not isinstance(optimizer, Muon):
+                    if needs_update_capture and not isinstance(optimizer, Muon):
                          # Snapshot parameters before step for non-Muon optimizers (AdamW)
                          param_snapshots = {}
                          for group in optimizer.param_groups:
@@ -431,8 +447,11 @@ def train_model(
                                 metrics_history['manifold_history'][f'alignment_V_{i}'].append(compute_subspace_alignment(w_v, delta_v, k=5))
                                 
                                 # Track Update Rank (The "Needle vs Wave" hypothesis)
-                                if proj in muon_opt.state and 'momentum_buffer' in muon_opt.state[proj]:
-                                    buf = muon_opt.state[proj]['momentum_buffer']
+                                # Handles both Muon (momentum_buffer) and AdamW (exp_avg)
+                                m_key = 'momentum_buffer' if 'momentum_buffer' in muon_opt.state[proj] else 'exp_avg'
+                                
+                                if proj in muon_opt.state and m_key in muon_opt.state[proj]:
+                                    buf = muon_opt.state[proj][m_key]
                                     buf_q = buf[:q_size]
                                     buf_v = buf[q_size + kv_size : q_size + 2 * kv_size]
                                     

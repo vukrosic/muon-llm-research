@@ -51,15 +51,15 @@ print('✅ Speedrun Data Ready!')
 "
 ```
 
-### Option B: If you train on 100M or 1B tokens, first read below
+### Option B: If you train on 100M, 1B or 2B tokens, first read below
 ```bash
 python3 -c "
 from datasets import load_dataset
 import os
-print('Downloading 1B Pretraining Data...')
-ds = load_dataset('vukrosic/blueberry-1B-pretrain')
-os.makedirs('processed_data/pretrain_1B', exist_ok=True)
-ds.save_to_disk('processed_data/pretrain_1B')
+print('Downloading 2B Pretraining Data...')
+ds = load_dataset('vukrosic/blueberry-2B-pretrain')
+os.makedirs('processed_data/pretrain_2B', exist_ok=True)
+ds.save_to_disk('processed_data/pretrain_2B')
 print('✅ Full Data Ready!')
 "
 ```

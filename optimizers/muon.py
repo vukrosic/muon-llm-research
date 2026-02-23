@@ -65,8 +65,10 @@ class Muon(torch.optim.Optimizer):
                 raw_u = g.lerp_(buf, group["momentum"]) if group["nesterov"] else buf
                 g = zeropower_polar_express(raw_u, steps=group["ns_steps"]) # steps are 5 for both ns and pe
                 
-                # Store update for research/manifold tracking
-                state["last_update"] = g.detach().cpu()
-                
+                # Apply update
                 g = g.to(p.dtype)
-                p.add_(g.view_as(p), alpha=-group["lr"] * max(1, p.size(-2) / p.size(-1))**0.5)
+                update = g.view_as(p) * (-group["lr"] * max(1, p.size(-2) / p.size(-1))**0.5)
+                p.add_(update)
+                
+                # Store update for research/manifold tracking (consistent with AdamW: p_new - p_old)
+                state["last_update"] = update.detach().cpu()
