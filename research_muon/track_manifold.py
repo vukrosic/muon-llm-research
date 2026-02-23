@@ -21,13 +21,16 @@ from optimizers.muon import Muon
 
 from utils.spectral import compute_spectral_stats, compute_singular_values
 
-def run_tracking_and_plot(tokens="2000000"):
-    print(f"Running training with --track_manifold true for {tokens} tokens...")
+def run_tracking_and_plot(tokens="2000000", resume=False):
+    print(f"Running training with --track_manifold true for {tokens} tokens (Resume: {resume})...")
     cmd = [
         "python", "train_llm.py",
         "--train_tokens", tokens,
-        "--track_manifold", "true"
+        "--track_manifold", "true",
+        "--save_every", "1000000" # Save every 1M tokens
     ]
+    if resume:
+        cmd.append("--resume")
     
     subprocess.run(cmd, check=True)
     
@@ -57,130 +60,145 @@ def plot_results(history, save_dir):
     
     # Handle nested manifold_history if present
     if 'manifold_history' in history:
-        # Merge manifold_history keys into a local view of history for plotting
         manifold_data = history['manifold_history']
-        # We want to keep 'steps' from the manifold_history if it exists there
         plotting_history = {**manifold_data}
         if 'steps' not in plotting_history and 'steps' in history:
             plotting_history['steps'] = history['steps']
         history = plotting_history
 
     sns.set_theme(style="whitegrid")
+    steps = history.get('steps', None)
     
     # 1. Training Loss
     plt.figure(figsize=(10, 6))
     if 'loss' in history and history['loss']:
         plt.plot(history['loss'], color='#2c3e50', linewidth=2)
-        plt.title('Hierarchical Learning: Training Loss Convergence')
+        plt.title('Training Loss Convergence', fontsize=15)
         plt.xlabel('Steps')
         plt.ylabel('Loss')
         plt.grid(True, alpha=0.3)
         plt.savefig(os.path.join(save_dir, 'loss.png'), dpi=300)
     plt.close()
 
-    # 2. Q vs V Spectral Max (First vs Last)
+    # 2. Max Spectral Norm Evolution (Stretching)
     plt.figure(figsize=(12, 7))
-    colors = ['#3498db', '#2980b9', '#e74c3c', '#c0392b']
-    # Dynamically find the last layer index
+    colors = ['#3498db', '#e74c3c', '#2ecc71', '#f1c40f']
     k_layers = sorted([int(k.split('_')[-1]) for k in history.keys() if k.startswith('spec_norm_Q_') and k.split('_')[-1].isdigit()])
     last_idx = k_layers[-1] if k_layers else 0
     
-    keys = ['spec_norm_Q_0', 'spec_norm_V_0', f'spec_norm_Q_{last_idx}', f'spec_norm_V_{last_idx}']
-    labels = ['Q (First)', 'V (First)', f'Q (Layer {last_idx})', f'V (Layer {last_idx})']
-    
-    steps = history.get('steps', None)
+    keys = ['spec_norm_Q_0', f'spec_norm_Q_{last_idx}', 'spec_norm_V_0', f'spec_norm_V_{last_idx}']
+    labels = ['Q (L0)', f'Q (L{last_idx})', 'V (L0)', f'V (L{last_idx})']
     
     for k, l, c in zip(keys, labels, colors):
         if k in history and history[k]:
             data = history[k]
-            # Only downsample if we have lots of data
             step_size = max(1, len(data) // 100)
+            x_axis = steps[::step_size] if steps is not None and len(steps) == len(data) else range(0, len(data)*step_size, step_size)
+            plt.plot(x_axis, data[::step_size], label=l, color=c, linewidth=2.5)
             
-            if steps is not None and len(steps) == len(data):
-                plt.plot(steps[::step_size], data[::step_size], label=l, color=c, linewidth=2, marker='o' if len(data) < 20 else None)
-            else:
-                plt.plot(data[::step_size], label=l, color=c, linewidth=2, marker='o' if len(data) < 20 else None)
-            
-    plt.title('Hierarchical Stretching: Max Spectral Norm Evolution')
-    plt.xlabel('Training Steps')
-    plt.ylabel('Spectral / Operator Norm')
-    plt.legend(frameon=True)
+    plt.title('Hierarchical Stretching: Max Spectral Norm Evolution', fontsize=16)
+    plt.xlabel('Steps')
+    plt.ylabel('$\sigma_max$ (Operator Norm)')
+    plt.legend(frameon=True, loc='upper left')
     plt.grid(True, alpha=0.3)
     plt.savefig(os.path.join(save_dir, 'spectral_stretching_evolution.png'), dpi=300)
     plt.close()
 
-    # 3. Spectral Gap (Q projections)
-    plt.figure(figsize=(10, 6))
-    steps = history.get('steps', None)
-    
-    if 'spec_gap_Q_0' in history and history['spec_gap_Q_0']:
-        data0 = history['spec_gap_Q_0']
-        step0 = max(1, len(data0) // 100)
-        if steps is not None and len(steps) == len(data0):
-            plt.plot(steps[::step0], data0[::step0], label='Layer 0 Gap', color='#16a085', marker='o' if len(data0) < 20 else None)
-        else:
-            plt.plot(data0[::step0], label='Layer 0 Gap', color='#16a085', marker='o' if len(data0) < 20 else None)
+    # 3. Update-Weight Alignment (Geometric Lock-in)
+    plt.figure(figsize=(12, 7))
+    # Plot top and bottom query/value alignment
+    alignment_keys = [f'alignment_Q_0', f'alignment_Q_{last_idx}', f'alignment_V_0', f'alignment_V_{last_idx}']
+    alignment_labels = ['Q-Align (L0)', f'Q-Align (L{last_idx})', 'V-Align (L0)', f'V-Align (L{last_idx})']
+    alignment_colors = ['#8e44ad', '#9b59b6', '#d35400', '#e67e22']
 
-    if 'spec_gap_Q_last' in history and history['spec_gap_Q_last']:
-        datalast = history['spec_gap_Q_last']
-        steplast = max(1, len(datalast) // 100)
-        if steps is not None and len(steps) == len(datalast):
-            plt.plot(steps[::steplast], datalast[::steplast], label='Layer Last Gap', color='#d35400', marker='o' if len(datalast) < 20 else None)
-        else:
-            plt.plot(datalast[::steplast], label='Layer Last Gap', color='#d35400', marker='o' if len(datalast) < 20 else None)
+    for k, l, c in zip(alignment_keys, alignment_labels, alignment_colors):
+        if k in history and history[k]:
+            data = history[k]
+            step_size = max(1, len(data) // 100)
+            x_axis = steps[::step_size] if steps is not None and len(steps) == len(data) else range(0, len(data)*step_size, step_size)
+            plt.plot(x_axis, data[::step_size], label=l, color=c, linewidth=2)
 
-    plt.title('Spectral Gap ($\sigma_1 / \sigma_2$): Signature of Singular Feature Focus')
-    plt.xlabel('Training Steps')
-    plt.ylabel('Gap Ratio')
-    plt.legend()
-    plt.savefig(os.path.join(save_dir, 'spectral_gap.png'), dpi=300)
+    plt.title('Geometric Lock-in: Update-Weight Subspace Alignment (k=5)', fontsize=16)
+    plt.xlabel('Steps')
+    plt.ylabel('Average Cosine Similarity')
+    plt.ylim(0, 1.05)
+    plt.legend(frameon=True)
+    plt.grid(True, alpha=0.3)
+    plt.savefig(os.path.join(save_dir, 'update_alignment.png'), dpi=300)
     plt.close()
 
-    # 4. Final Spectral Norm Distribution (Heatmap)
-    plt.figure(figsize=(18, 6))
-    q_norms, k_norms, v_norms, o_norms, up_norms, down_norms = [], [], [], [], [], []
-    layer_names = []
+    # 4. Orthogonality Error (Manifold Departure)
+    plt.figure(figsize=(12, 7))
+    ortho_keys = [f'ortho_err_Q_0', f'ortho_err_Q_{last_idx}', f'ortho_err_V_0', f'ortho_err_V_{last_idx}']
+    ortho_labels = ['Q-Ortho (L0)', f'Q-Ortho (L{last_idx})', 'V-Ortho (L0)', f'V-Ortho (L{last_idx})']
+    ortho_colors = ['#16a085', '#1abc9c', '#c0392b', '#e74c3c']
+
+    for k, l, c in zip(ortho_keys, ortho_labels, ortho_colors):
+        if k in history and history[k]:
+            data = history[k]
+            step_size = max(1, len(data) // 100)
+            x_axis = steps[::step_size] if steps is not None and len(steps) == len(data) else range(0, len(data)*step_size, step_size)
+            plt.plot(x_axis, data[::step_size], label=l, color=c, linewidth=2)
+
+    plt.title('Manifold Departure: Orthogonality Error $||(W/|W|)^T(W/|W|) - I||_F/\sqrt{d}$', fontsize=14)
+    plt.xlabel('Steps')
+    plt.ylabel('Departure from Orthogonality')
+    plt.legend(frameon=True)
+    plt.grid(True, alpha=0.3)
+    plt.savefig(os.path.join(save_dir, 'orthogonality_error.png'), dpi=300)
+    plt.close()
+
+    # 5. Spectral Entropy MRI (Capacity Utilization)
+    plt.figure(figsize=(14, 8))
+    gs = plt.GridSpec(2, 1, height_ratios=[1, 2], hspace=0.3)
     
-    k_layers = sorted([int(k.split('_')[-1]) for k in history.keys() if k.startswith('spec_norm_Q_') and k.split('_')[-1].isdigit()])
-    
+    # Data extraction
+    e_q, e_v, depths = [], [], []
     for i in k_layers:
-        q_norms.append(history[f'spec_norm_Q_{i}'][-1])
-        k_norms.append(history.get(f'spec_norm_K_{i}', [0])[-1])
-        v_norms.append(history[f'spec_norm_V_{i}'][-1])
-        o_norms.append(history.get(f'spec_norm_O_{i}', [0])[-1])
-        up_norms.append(history.get(f'spec_norm_Up_{i}', [0])[-1])
-        down_norms.append(history.get(f'spec_norm_Down_{i}', [0])[-1])
-        layer_names.append(f"L{i}")
+        if f'entropy_Q_{i}' in history:
+            e_q.append(history[f'entropy_Q_{i}'][-1])
+            e_v.append(history[f'entropy_V_{i}'][-1])
+            depths.append(i)
+            
+    if e_q and e_v:
+        # Top Panel: Line Plot (The "Line on Graph" request)
+        ax0 = plt.subplot(gs[0])
+        ax0.plot(depths, e_q, marker='o', color='#e74c3c', label='Query Entropy', linewidth=2.5, markersize=8)
+        ax0.plot(depths, e_v, marker='s', color='#2ecc71', label='Value Entropy', linewidth=2.5, markersize=8)
+        ax0.set_ylim(0.4, 1.05)
+        ax0.set_title('Spectral Entropy vs Depth: The Capacity MRI', fontsize=16, fontweight='bold')
+        ax0.set_ylabel('Entropy Score')
+        ax0.legend(loc='lower left', frameon=True)
+        ax0.grid(True, alpha=0.3)
         
-    if q_norms:
-        heatmap_data = np.array([q_norms, v_norms])
-        sns.heatmap(heatmap_data, annot=True, fmt=".2f", cmap="YlGnBu", 
-                    xticklabels=layer_names, yticklabels=['Query', 'Value'],
-                    annot_kws={"size": 8})
-        plt.title('Final Q & V Spectral Norm Distribution Across All Layers')
+        # Bottom Panel: Heatmap (The "MRI Scan")
+        ax1 = plt.subplot(gs[1])
+        heatmap_data = np.array([e_q, e_v])
+        sns.heatmap(heatmap_data, annot=True, fmt=".2f", cmap="magma", 
+                    xticklabels=[f"L{i}" for i in depths], yticklabels=['Query', 'Value'],
+                    ax=ax1, cbar_kws={'label': 'Utilization (1.0 = Max)'},
+                    annot_kws={"size": 10, "weight": "bold"})
+        ax1.set_xlabel('Layer Index (Depth)')
+        ax1.set_title('Final Layer Utilization Heatmap', fontsize=14)
+        
         plt.tight_layout()
-        plt.savefig(os.path.join(save_dir, 'norm_heatmap.png'), dpi=300)
+        plt.savefig(os.path.join(save_dir, 'entropy_mri.png'), dpi=300)
     plt.close()
 
-    # 4b. Spectral Norm vs Depth (Scatter Plot)
+    # 6. Spectral Norm vs Depth (Scatter Plot)
     plt.figure(figsize=(12, 6))
-    colors = {
-        'Q': '#e74c3c',   # Red
-        'V': '#2ecc71',   # Green
-    }
+    proj_types = {'Q': '#e74c3c', 'V': '#2ecc71', 'Up': '#3498db', 'Down': '#f1c40f'}
     
-    for proj_type, color in colors.items():
-        norms = []
-        depths = []
+    for proj, color in proj_types.items():
+        norms, depths = [], []
         for i in k_layers:
-            key = f'spec_norm_{proj_type}_{i}'
+            key = f'spec_norm_{proj}_{i}'
             if key in history:
                 norms.append(history[key][-1])
                 depths.append(i)
         
         if norms:
-            plt.scatter(depths, norms, color=color, label=f'{proj_type} Proj', s=60, alpha=0.7, edgecolors='white')
-            # Add a trend line
+            plt.scatter(depths, norms, color=color, label=f'{proj} Proj', s=70, alpha=0.7, edgecolors='white')
             if len(depths) > 1:
                 z = np.polyfit(depths, norms, 1)
                 p = np.poly1d(z)
@@ -188,68 +206,103 @@ def plot_results(history, save_dir):
 
     plt.xlabel('Layer Index (Depth)')
     plt.ylabel('Final Spectral Norm')
-    plt.title('Spectral Norm vs Depth by Projection Type')
+    plt.title('Spectral Norm Scaling Across Model Depth', fontsize=15)
     plt.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
     plt.grid(True, alpha=0.3)
     plt.tight_layout()
     plt.savefig(os.path.join(save_dir, 'spectral_norm_vs_depth.png'), dpi=300)
     plt.close()
 
-    # 5. Top Singular Values (Final Step)
-    plt.figure(figsize=(10, 6))
-    if 'spec_vals_Q_0' in history and history['spec_vals_Q_0']:
-        v0 = history['spec_vals_Q_0'][-1]
-        vlast = history['spec_vals_Q_last'][-1]
-        plt.bar(np.arange(len(v0))-0.2, v0, width=0.4, label='Layer 0 (Query)', alpha=0.8)
-        plt.bar(np.arange(len(vlast))+0.2, vlast, width=0.4, label='Layer Last (Query)', alpha=0.8)
-        plt.title('Top 10 Singular Values: Spectral Signatures')
+    # 7. Singular Spectrum Decay
+    plt.figure(figsize=(12, 7))
+    if f'spec_vals_Q_0' in history and history[f'spec_vals_Q_0']:
+        v0 = history[f'spec_vals_Q_0'][-1]
+        vlast = history[f'spec_vals_Q_last'][-1]
+        # Normalize to see decay shape
+        v0_norm = np.array(v0) / v0[0]
+        vlast_norm = np.array(vlast) / vlast[0]
+        
+        indices = np.arange(len(v0))
+        plt.bar(indices-0.2, v0_norm, width=0.4, label='Layer 0 (Query)', color='#3498db', alpha=0.8)
+        plt.bar(indices+0.2, vlast_norm, width=0.4, label=f'Layer {last_idx} (Query)', color='#e67e22', alpha=0.8)
+        
+        plt.title('Normalized Singular Value Decay: Spectral Signature', fontsize=15)
         plt.xlabel('Singular Value Index')
-        plt.ylabel('Value')
+        plt.ylabel('Value (Normalized to $\sigma_1=1$)')
+        plt.xticks(indices)
         plt.legend()
         plt.savefig(os.path.join(save_dir, 'singular_spectrum.png'), dpi=300)
     plt.close()
 
-    # 6. Update-Weight Alignment (Geometric Lock-in)
+    # 8. Spectral Gap Evolution
     plt.figure(figsize=(10, 6))
-    k_layers = sorted([int(lk.split('_')[-1]) for lk in history.keys() if lk.startswith('alignment_Q_') and lk.split('_')[-1].isdigit()])
-    last_idx = k_layers[-1] if k_layers else 0
+    gap_keys = ['spec_gap_Q_0', 'spec_gap_Q_last']
+    gap_labels = ['L0 Gap', f'L{last_idx} Gap']
     
-    if f'alignment_Q_0' in history and history[f'alignment_Q_0']:
-        data0 = history[f'alignment_Q_0']
-        datalast = history[f'alignment_Q_{last_idx}']
-        steps = history.get('steps', list(range(len(data0))))
-        
-        # Downsample
-        step_sz = max(1, len(data0) // 100)
-        plt.plot(steps[::step_sz], data0[::step_sz], label='Layer 0 Alignment', color='#8e44ad', linewidth=2)
-        plt.plot(steps[::step_sz], datalast[::step_sz], label=f'Layer {last_idx} Alignment', color='#f39c12', linewidth=2)
-        
-        plt.title('Update-Weight Subspace Alignment (k=5)')
-        plt.xlabel('Training Steps')
-        plt.ylabel('Cosine Similarity (1.0 = Max Lock-in)')
-        plt.legend()
-        plt.grid(True, alpha=0.3)
-        plt.savefig(os.path.join(save_dir, 'update_alignment.png'), dpi=300)
+    for k, l in zip(gap_keys, gap_labels):
+        if k in history and history[k]:
+            data = history[k]
+            step_size = max(1, len(data) // 100)
+            x_axis = steps[::step_size] if steps is not None and len(steps) == len(data) else range(0, len(data)*step_size, step_size)
+            plt.plot(x_axis, data[::step_size], label=l, linewidth=2)
+
+    plt.title('Singular Feature Focus: Spectral Gap ($\sigma_1/\sigma_2$)', fontsize=15)
+    plt.xlabel('Steps')
+    plt.ylabel('Gap Ratio')
+    plt.legend()
+    plt.grid(True, alpha=0.3)
+    plt.savefig(os.path.join(save_dir, 'spectral_gap.png'), dpi=300)
+    plt.close()
+    # 10. Subspace Diagnostic: Efficiency Ratio (Alignment / Rank)
+    plt.figure(figsize=(12, 7))
+    ratio_layers = [0, last_idx]
+    colors = ['#8e44ad', '#2980b9']
+    
+    for i, c in zip(ratio_layers, colors):
+        r_key = f'update_rank_Q_{i}'
+        a_key = f'alignment_Q_{i}'
+        if r_key in history and a_key in history:
+            ranks = np.array(history[r_key])
+            aligns = np.array(history[a_key])
+            ratios = aligns / (ranks + 1e-6)
+            step_size = max(1, len(ratios) // 100)
+            x_axis = steps[::step_size] if steps is not None and len(steps) == len(ratios) else range(0, len(ratios)*step_size, step_size)
+            plt.plot(x_axis, ratios[::step_size], label=f'L{i} Q-Efficiency', color=c, linewidth=2.5)
+
+    plt.title('Subspace Diagnostic: Optimizer "Efficiency" ($Alignment / Rank$)', fontsize=14)
+    plt.xlabel('Steps')
+    plt.ylabel('Efficiency (High = Sharp Needle)')
+    plt.legend()
+    plt.grid(True, alpha=0.3)
+    plt.savefig(os.path.join(save_dir, 'subspace_efficiency.png'), dpi=300)
     plt.close()
 
-    # 7. Spectral Entropy Heatmap (Capacity Utilization)
-    plt.figure(figsize=(16, 5))
-    e_q = []
-    e_v = []
-    l_names = []
-    for i in k_layers:
-        if f'entropy_Q_{i}' in history:
-            e_q.append(history[f'entropy_Q_{i}'][-1])
-            e_v.append(history[f'entropy_V_{i}'][-1])
-            l_names.append(f"L{i}")
+    # 11. Update Rank Evolution (Needle vs Wave)
+    plt.figure(figsize=(12, 7))
+    v_colors = ['#27ae60', '#16a085']
+    for i, (qc, vc) in enumerate(zip(colors, v_colors)):
+        layer_idx = 0 if i == 0 else last_idx
+        qr_key = f'update_rank_Q_{layer_idx}'
+        vr_key = f'update_rank_V_{layer_idx}'
+        
+        if qr_key in history:
+            data = np.array(history[qr_key])
+            step_size = max(1, len(data) // 100)
+            x_axis = steps[::step_size] if steps is not None and len(steps) == len(data) else range(0, len(data)*step_size, step_size)
+            plt.plot(x_axis, data[::step_size], label=f'L{layer_idx} Q-Update Rank', color=qc, linewidth=2)
             
-    if e_q and e_v:
-        heatmap_data = np.array([e_q, e_v])
-        sns.heatmap(heatmap_data, annot=True, fmt=".2f", cmap="magma", 
-                    xticklabels=l_names, yticklabels=['Query Entropy', 'Value Entropy'])
-        plt.title('Final Spectral Entropy: Capacity Utilization (0.0 = Low Rank, 1.0 = Full Rank)')
-        plt.tight_layout()
-        plt.savefig(os.path.join(save_dir, 'entropy_heatmap.png'), dpi=300)
+        if vr_key in history:
+            data = np.array(history[vr_key])
+            step_size = max(1, len(data) // 100)
+            x_axis = steps[::step_size] if steps is not None and len(steps) == len(data) else range(0, len(data)*step_size, step_size)
+            plt.plot(x_axis, data[::step_size], label=f'L{layer_idx} V-Update Rank', color=vc, linestyle='--', linewidth=2)
+
+    plt.title('Update Rank Evolution: Q-Needle vs V-Wave', fontsize=14)
+    plt.xlabel('Steps')
+    plt.ylabel('Effective Rank of Momentum')
+    plt.legend()
+    plt.grid(True, alpha=0.3)
+    plt.savefig(os.path.join(save_dir, 'update_rank_evolution.png'), dpi=300)
     plt.close()
 
     print(f"Research plots successfully saved to {save_dir}/")
@@ -260,6 +313,7 @@ if __name__ == '__main__':
     parser.add_argument("--tokens", type=str, default="2000000")
     parser.add_argument("--plot_only", action="store_true")
     parser.add_argument("--metrics_file", type=str, default=None)
+    parser.add_argument("--resume", action="store_true", help="Resume from last checkpoint")
     args = parser.parse_args()
     
     if args.plot_only:
@@ -281,4 +335,4 @@ if __name__ == '__main__':
         else:
             print("No manifold history found.")
     else:
-        run_tracking_and_plot(args.tokens)
+        run_tracking_and_plot(args.tokens, args.resume)

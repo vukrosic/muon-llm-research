@@ -89,3 +89,39 @@ def compute_spectral_entropy(tensor):
         # Normalize by max possible entropy (log of rank)
         max_entropy = math.log(len(s)) if len(s) > 1 else 1.0
         return entropy / max_entropy
+
+def compute_orthogonality_error(tensor):
+    """Measures || (W/||W||_2)^T (W/||W||_2) - I ||_F / sqrt(d)"""
+    with torch.no_grad():
+        if tensor.ndim < 2:
+            return 0.0
+        t = tensor.view(-1, tensor.size(-1)).detach().cpu().float()
+        
+        # SVD to get spectral norm for normalization
+        s = torch.linalg.svdvals(t)
+        if len(s) == 0 or s[0] == 0:
+            return 1.0
+            
+        t_norm = t / s[0]
+        
+        if t_norm.size(0) >= t_norm.size(1):
+            m = t_norm.mT @ t_norm
+        else:
+            m = t_norm @ t_norm.mT
+            
+        eye = torch.eye(m.size(0))
+        err = torch.norm(m - eye, p='fro').item() / math.sqrt(m.size(0))
+        return err
+def compute_effective_rank(tensor):
+    """Computes effective rank: exp(H(singular_values))"""
+    with torch.no_grad():
+        if tensor.ndim < 2:
+            return 0.0
+        t = tensor.view(-1, tensor.size(-1)).detach().cpu().float()
+        s = torch.linalg.svdvals(t)
+        if len(s) == 0 or s.sum() == 0:
+            return 0.0
+        p = s / s.sum()
+        # Shannon entropy
+        ent = -torch.sum(p * torch.log(p + 1e-10))
+        return torch.exp(ent).item()

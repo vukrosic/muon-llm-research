@@ -21,7 +21,8 @@ from utils.spectral import (
     compute_spectral_stats, 
     compute_singular_values,
     compute_subspace_alignment,
-    compute_spectral_entropy
+    compute_spectral_entropy,
+    compute_orthogonality_error
 )
 
 
@@ -291,6 +292,10 @@ def train_model(
                             # Log Spectral Entropy (Capacity Allocation) for Q and V
                             metrics_history['manifold_history'][f'entropy_Q_{i}'].append(compute_spectral_entropy(w_q))
                             metrics_history['manifold_history'][f'entropy_V_{i}'].append(compute_spectral_entropy(w_v))
+                            
+                            # Log Orthogonality Error (Manifold Departure)
+                            metrics_history['manifold_history'][f'ortho_err_Q_{i}'].append(compute_orthogonality_error(w_q))
+                            metrics_history['manifold_history'][f'ortho_err_V_{i}'].append(compute_orthogonality_error(w_v))
 
                             # Log Update-Weight Alignment (Geometric Lock-in)
                             muon_opt = optimizers[0]
@@ -301,6 +306,16 @@ def train_model(
                                 
                                 metrics_history['manifold_history'][f'alignment_Q_{i}'].append(compute_subspace_alignment(w_q, delta_q, k=5))
                                 metrics_history['manifold_history'][f'alignment_V_{i}'].append(compute_subspace_alignment(w_v, delta_v, k=5))
+                                
+                                # Track Update Rank (The "Needle vs Wave" hypothesis)
+                                if proj in muon_opt.state and 'momentum_buffer' in muon_opt.state[proj]:
+                                    buf = muon_opt.state[proj]['momentum_buffer']
+                                    buf_q = buf[:q_size]
+                                    buf_v = buf[q_size + kv_size : q_size + 2 * kv_size]
+                                    
+                                    from utils.spectral import compute_effective_rank
+                                    metrics_history['manifold_history'][f'update_rank_Q_{i}'].append(compute_effective_rank(buf_q))
+                                    metrics_history['manifold_history'][f'update_rank_V_{i}'].append(compute_effective_rank(buf_v))
                             
                             # Track detailed stats for first and last layers
                             if i == 0 or i == num_layers - 1:
@@ -443,13 +458,29 @@ def train_model(
         
         # Save model checkpoint
         checkpoint_path = output_path / "model.pt"
+        resumable_path = Path(checkpoint_dir if checkpoint_dir else output_dir) / "latest_checkpoint.pt"
+        
+        checkpoint_data = {
+            'step': step,
+            'tokens_seen': tokens_seen,
+            'model_state_dict': model.state_dict(),
+            'optimizer_states': [opt.state_dict() for opt in optimizers],
+            'scheduler_states': [sch.state_dict() for sch in schedulers] if schedulers else [],
+            'metrics_history': metrics_history,
+        }
+        
         torch.save({
             'model_state_dict': model.state_dict(),
             'config': config,
             'metrics': final_eval,
             'step': step,
         }, checkpoint_path)
-        print(f"   💾 Model saved to {checkpoint_path}")
+        
+        # Also update the latest_checkpoint.pt so we can resume
+        torch.save(checkpoint_data, resumable_path)
+        
+        print(f"   💾 Final model saved to {checkpoint_path}")
+        print(f"   🔄 Resumable checkpoint saved to {resumable_path}")
     
     return {
         'model': model,
