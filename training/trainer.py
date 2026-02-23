@@ -326,6 +326,7 @@ def train_model(
                         # Add loss and steps to manifold history for synchronization
                         metrics_history['manifold_history']['loss'].append(current_loss_val)
                         metrics_history['manifold_history']['steps'].append(step)
+                        metrics_history['manifold_history']['tokens'].append(tokens_seen)
             
             pbar.update(batch_tokens)
             tokens_seen += batch_tokens

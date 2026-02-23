@@ -68,14 +68,37 @@ def plot_results(history, save_dir):
 
     sns.set_theme(style="whitegrid")
     steps = history.get('steps', None)
+    tokens = history.get('tokens', None)
+    
+    # Infer tokens if missing (approximate: 16384 tokens per step)
+    if tokens is None and steps is not None:
+        tokens = [s * 16384 for s in steps]
+
+    def add_token_x_axis(ax, steps_data, tokens_data):
+        if tokens_data is None or len(tokens_data) < 2 or steps_data is None or len(steps_data) < 2:
+            return
+        ax2 = ax.twiny()
+        ax2.set_xlim(ax.get_xlim())
+        xticks = ax.get_xticks()
+        valid_mask = (xticks >= min(steps_data)) & (xticks <= max(steps_data))
+        valid_ticks = xticks[valid_mask]
+        if len(valid_ticks) > 0:
+            token_ticks = np.interp(valid_ticks, steps_data, tokens_data)
+            ax2.set_xticks(valid_ticks)
+            ax2.set_xticklabels([f"{int(t/1e6):,}M" for t in token_ticks])
+            ax2.set_xlabel('Tokens', alpha=0.7, fontsize=10)
+            ax2.grid(False)
     
     # 1. Training Loss
     plt.figure(figsize=(10, 6))
     if 'loss' in history and history['loss']:
-        plt.plot(history['loss'], color='#2c3e50', linewidth=2)
+        x_axis = steps if steps is not None and len(steps) == len(history['loss']) else range(len(history['loss']))
+        plt.plot(x_axis, history['loss'], color='#2c3e50', linewidth=2)
         plt.title('Training Loss Convergence', fontsize=15)
         plt.xlabel('Steps')
         plt.ylabel('Loss')
+        if steps is not None:
+            add_token_x_axis(plt.gca(), steps, tokens)
         plt.grid(True, alpha=0.3)
         plt.savefig(os.path.join(save_dir, 'loss.png'), dpi=300)
     plt.close()
@@ -100,6 +123,8 @@ def plot_results(history, save_dir):
     plt.xlabel('Steps')
     plt.ylabel('$\sigma_max$ (Operator Norm)')
     plt.legend(frameon=True, loc='upper left')
+    if steps is not None:
+        add_token_x_axis(plt.gca(), steps, tokens)
     plt.grid(True, alpha=0.3)
     plt.savefig(os.path.join(save_dir, 'spectral_stretching_evolution.png'), dpi=300)
     plt.close()
@@ -121,8 +146,9 @@ def plot_results(history, save_dir):
     plt.title('Geometric Lock-in: Update-Weight Subspace Alignment (k=5)', fontsize=16)
     plt.xlabel('Steps')
     plt.ylabel('Average Cosine Similarity')
-    plt.ylim(0, 1.05)
     plt.legend(frameon=True)
+    if steps is not None:
+        add_token_x_axis(plt.gca(), steps, tokens)
     plt.grid(True, alpha=0.3)
     plt.savefig(os.path.join(save_dir, 'update_alignment.png'), dpi=300)
     plt.close()
@@ -144,6 +170,8 @@ def plot_results(history, save_dir):
     plt.xlabel('Steps')
     plt.ylabel('Departure from Orthogonality')
     plt.legend(frameon=True)
+    if steps is not None:
+        add_token_x_axis(plt.gca(), steps, tokens)
     plt.grid(True, alpha=0.3)
     plt.savefig(os.path.join(save_dir, 'orthogonality_error.png'), dpi=300)
     plt.close()
@@ -250,6 +278,8 @@ def plot_results(history, save_dir):
     plt.xlabel('Steps')
     plt.ylabel('Gap Ratio')
     plt.legend()
+    if steps is not None:
+        add_token_x_axis(plt.gca(), steps, tokens)
     plt.grid(True, alpha=0.3)
     plt.savefig(os.path.join(save_dir, 'spectral_gap.png'), dpi=300)
     plt.close()
@@ -260,6 +290,8 @@ def plot_results(history, save_dir):
     
     for i, c in zip(ratio_layers, colors):
         r_key = f'update_rank_Q_{i}'
+        if r_key not in history:
+            r_key = f'update_rank_{i}'
         a_key = f'alignment_Q_{i}'
         if r_key in history and a_key in history:
             ranks = np.array(history[r_key])
@@ -273,6 +305,8 @@ def plot_results(history, save_dir):
     plt.xlabel('Steps')
     plt.ylabel('Efficiency (High = Sharp Needle)')
     plt.legend()
+    if steps is not None:
+        add_token_x_axis(plt.gca(), steps, tokens)
     plt.grid(True, alpha=0.3)
     plt.savefig(os.path.join(save_dir, 'subspace_efficiency.png'), dpi=300)
     plt.close()
@@ -283,6 +317,8 @@ def plot_results(history, save_dir):
     for i, (qc, vc) in enumerate(zip(colors, v_colors)):
         layer_idx = 0 if i == 0 else last_idx
         qr_key = f'update_rank_Q_{layer_idx}'
+        if qr_key not in history:
+            qr_key = f'update_rank_{layer_idx}'
         vr_key = f'update_rank_V_{layer_idx}'
         
         if qr_key in history:
@@ -301,6 +337,8 @@ def plot_results(history, save_dir):
     plt.xlabel('Steps')
     plt.ylabel('Effective Rank of Momentum')
     plt.legend()
+    if steps is not None:
+        add_token_x_axis(plt.gca(), steps, tokens)
     plt.grid(True, alpha=0.3)
     plt.savefig(os.path.join(save_dir, 'update_rank_evolution.png'), dpi=300)
     plt.close()
