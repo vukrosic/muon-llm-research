@@ -53,6 +53,7 @@ class DataConfig:
     dataset_path: str = "auto"
     dataset_name: Optional[str] = "cosmopedia-v2"
     split: str = "train"
+    data_files: Optional[Union[str, list]] = None
     
     # Tokenizer
     tokenizer_name: str = "HuggingFaceTB/SmolLM2-135M"

@@ -65,63 +65,81 @@ def prepare_datasets(data_cfg, tokenizer, cache_dir="./processed_data"):
             except json.JSONDecodeError:
                 print("Warning: Could not read prep_metadata.json")
         
-        # Heuristic: check if it has dataset_dict.json or state.json or just load it
-        try:
-            print(f"Loading pre-processed dataset from {data_cfg.dataset_path}...")
-            # We assume it's a dataset with "input_ids" and "labels"
-            ds = load_from_disk(data_cfg.dataset_path)
+        # CASE 0.1: Check if it's a directory of Parquet files
+        import glob
+        parquet_files = sorted(glob.glob(os.path.join(data_cfg.dataset_path, "*.parquet")))
+        if parquet_files:
+            # Optimize: only load shards we likely need
+            # 1 shard is ~15k docs, so 20 shards is ~300k docs (plenty for 100M tokens)
+            needed_shards = max(1, (data_cfg.num_samples // 15000) + 1)
+            # Add a safety margin
+            needed_shards = min(len(parquet_files), int(needed_shards * 1.5))
             
-            # Set format to torch for preprocessed datasets
-            if hasattr(ds, 'set_format'):
-                # Single dataset
-                if "input_ids" in ds.column_names and "labels" in ds.column_names:
-                    ds.set_format(type="torch", columns=["input_ids", "labels"])
+            selected_files = parquet_files[:needed_shards]
+            print(f"Detected {len(parquet_files)} local parquet files. Loading {len(selected_files)} shards for {data_cfg.num_samples} docs...")
             
-            # If it's a DatasetDict (train, val), return it
-            if isinstance(ds, dict) or hasattr(ds, "keys"):
-                if "train" in ds and "val" in ds:
-                    # Set format for both splits
-                    if hasattr(ds["train"], 'set_format'):
-                        ds["train"].set_format(type="torch", columns=["input_ids", "labels"])
-                        ds["val"].set_format(type="torch", columns=["input_ids", "labels"])
-                    return ds["train"], ds["val"]
-                elif "train" in ds:
-                    # Splitting manually if only train exists
-                    print("Found only 'train' split. Creating validation split...")
-                    splitted = ds["train"].train_test_split(test_size=0.1, seed=42)
-                    # Set format for both splits
-                    splitted["train"].set_format(type="torch", columns=["input_ids", "labels"])
-                    splitted["test"].set_format(type="torch", columns=["input_ids", "labels"])
-                    return splitted["train"], splitted["test"]
-            
-            # If it's a single Dataset (just rows)
-            print("Loaded single dataset. Splitting into train/val...")
-            splitted = ds.train_test_split(test_size=0.1, seed=42)
-            # Set format for both splits
-            splitted["train"].set_format(type="torch", columns=["input_ids", "labels"])
-            splitted["test"].set_format(type="torch", columns=["input_ids", "labels"])
-            return splitted["train"], splitted["test"]
-
-        except Exception as e:
-
-            # Fallback: try loading "train" and "val" subdirectories directly
+            data_cfg.dataset_path = "parquet"
+            data_cfg.dataset_name = None 
+            data_cfg.data_files = selected_files
+            data_cfg.streaming = False # Non-streaming is MUCH faster for local parquet
+        else:
+            # Heuristic: check if it has dataset_dict.json or state.json or just load it
             try:
-                train_path = os.path.join(data_cfg.dataset_path, "train")
-                val_path = os.path.join(data_cfg.dataset_path, "val")
-                if os.path.exists(train_path) and os.path.exists(val_path):
-                    print(f"Loading separate train/val datasets from {data_cfg.dataset_path}...")
-                    train_ds = load_from_disk(train_path)
-                    val_ds = load_from_disk(val_path)
-                    
-                    if hasattr(train_ds, 'set_format'):
-                        train_ds.set_format(type="torch", columns=["input_ids", "labels"])
-                    if hasattr(val_ds, 'set_format'):
-                        val_ds.set_format(type="torch", columns=["input_ids", "labels"])
-                    return train_ds, val_ds
-            except Exception as e2:
-                print(f"Sub-directory load failed: {e2}")
+                print(f"Loading pre-processed dataset from {data_cfg.dataset_path}...")
+                # We assume it's a dataset with "input_ids" and "labels"
+                ds = load_from_disk(data_cfg.dataset_path)
+                
+                # Set format to torch for preprocessed datasets
+                if hasattr(ds, 'set_format'):
+                    # Single dataset
+                    if "input_ids" in ds.column_names and "labels" in ds.column_names:
+                        ds.set_format(type="torch", columns=["input_ids", "labels"])
+                
+                # If it's a DatasetDict (train, val), return it
+                if isinstance(ds, dict) or hasattr(ds, "keys"):
+                    if "train" in ds and "val" in ds:
+                        # Set format for both splits
+                        if hasattr(ds["train"], 'set_format'):
+                            ds["train"].set_format(type="torch", columns=["input_ids", "labels"])
+                            ds["val"].set_format(type="torch", columns=["input_ids", "labels"])
+                        return ds["train"], ds["val"]
+                    elif "train" in ds:
+                        # Splitting manually if only train exists
+                        print("Found only 'train' split. Creating validation split...")
+                        splitted = ds["train"].train_test_split(test_size=0.1, seed=42)
+                        # Set format for both splits
+                        splitted["train"].set_format(type="torch", columns=["input_ids", "labels"])
+                        splitted["test"].set_format(type="torch", columns=["input_ids", "labels"])
+                        return splitted["train"], splitted["test"]
+                
+                # If it's a single Dataset (just rows)
+                print("Loaded single dataset. Splitting into train/val...")
+                splitted = ds.train_test_split(test_size=0.1, seed=42)
+                # Set format for both splits
+                splitted["train"].set_format(type="torch", columns=["input_ids", "labels"])
+                splitted["test"].set_format(type="torch", columns=["input_ids", "labels"])
+                return splitted["train"], splitted["test"]
 
-            print(f"Could not load as direct dataset ({e}). Falling back to HF loading...")
+            except Exception as e:
+
+                # Fallback: try loading "train" and "val" subdirectories directly
+                try:
+                    train_path = os.path.join(data_cfg.dataset_path, "train")
+                    val_path = os.path.join(data_cfg.dataset_path, "val")
+                    if os.path.exists(train_path) and os.path.exists(val_path):
+                        print(f"Loading separate train/val datasets from {data_cfg.dataset_path}...")
+                        train_ds = load_from_disk(train_path)
+                        val_ds = load_from_disk(val_path)
+                        
+                        if hasattr(train_ds, 'set_format'):
+                            train_ds.set_format(type="torch", columns=["input_ids", "labels"])
+                        if hasattr(val_ds, 'set_format'):
+                            val_ds.set_format(type="torch", columns=["input_ids", "labels"])
+                        return train_ds, val_ds
+                except Exception as e2:
+                    print(f"Sub-directory load failed: {e2}")
+
+                print(f"Could not load as direct dataset ({e}). Falling back to HF loading...")
 
     # cache_dir provided via argument
     train_cache = os.path.join(cache_dir, "train")
@@ -132,6 +150,7 @@ def prepare_datasets(data_cfg, tokenizer, cache_dir="./processed_data"):
     config_state = {
         "dataset_path": data_cfg.dataset_path,
         "dataset_name": data_cfg.dataset_name,
+        "data_files": str(data_cfg.data_files) if data_cfg.data_files else None,
         "tokenizer_name": data_cfg.tokenizer_name,
         "seq_length": data_cfg.seq_length,
         "num_samples": data_cfg.num_samples,
@@ -149,9 +168,13 @@ def prepare_datasets(data_cfg, tokenizer, cache_dir="./processed_data"):
             print(f"Cache check failed ({e}). Rebuilding...")
     
     # 2. Rebuild cache
-    if os.path.exists(cache_dir):
-        print(f"Cleaning old cache at {cache_dir}...")
-        shutil.rmtree(cache_dir)
+    # Be surgical: only remove the files we would create
+    for p in [train_cache, val_cache, info_path]:
+        if os.path.exists(p):
+            if os.path.isdir(p):
+                shutil.rmtree(p)
+            else:
+                os.remove(p)
     
     # Ensure directory exists immediately
     os.makedirs(cache_dir, exist_ok=True)
@@ -161,18 +184,63 @@ def prepare_datasets(data_cfg, tokenizer, cache_dir="./processed_data"):
     raw_dataset = load_dataset(
         data_cfg.dataset_path,
         data_cfg.dataset_name,
+        data_files=data_cfg.data_files,
         split=data_cfg.split,
         cache_dir=data_cfg.cache_dir,
-        streaming=True,
+        streaming=data_cfg.streaming,
     )
     
-    # Streaming requires taking samples explicitly
-    raw_samples = list(raw_dataset.take(data_cfg.num_samples))
-    num_val = int(len(raw_samples) * 0.1)
-    num_train = len(raw_samples) - num_val
-    
-    raw_train = Dataset.from_list(raw_samples[:num_train])
-    raw_val = Dataset.from_list(raw_samples[num_train:])
+    # If the dataset is already tokenized (like the 2B parquet set), we can skip straight to finalizing
+    if "input_ids" in raw_dataset.column_names and "labels" in raw_dataset.column_names:
+        print("✓ Dataset is already tokenized. Skipping processing.")
+        # For non-streaming, we can use the same split logic
+        if data_cfg.streaming:
+             raw_samples = list(raw_dataset.take(data_cfg.num_samples))
+             num_val = int(len(raw_samples) * 0.1)
+             raw_train = Dataset.from_list(raw_samples[num_val:])
+             raw_val = Dataset.from_list(raw_samples[:num_val])
+        else:
+             total_available = len(raw_dataset)
+             num_to_take = min(total_available, data_cfg.num_samples)
+             if num_to_take < total_available:
+                 subset = raw_dataset.select(range(num_to_take))
+             else:
+                 subset = raw_dataset
+             splitted = subset.train_test_split(test_size=0.1, seed=42)
+             raw_train = splitted["train"]
+             raw_val = splitted["test"]
+        
+        # Ensure torch format
+        raw_train.set_format(type="torch", columns=["input_ids", "labels"])
+        raw_val.set_format(type="torch", columns=["input_ids", "labels"])
+        
+        print(f"Split into {len(raw_train):,} train docs and {len(raw_val):,} val docs")
+        return raw_train, raw_val
+
+    # Handling sampling and splitting (for raw text datasets)
+    if data_cfg.streaming:
+        print(f"Streaming mode: Materializing first {data_cfg.num_samples:,} samples...")
+        raw_samples = list(raw_dataset.take(data_cfg.num_samples))
+        num_val = int(len(raw_samples) * 0.1)
+        raw_train = Dataset.from_list(raw_samples[num_val:])
+        raw_val = Dataset.from_list(raw_samples[:num_val])
+    else:
+        # For non-streaming, we can just slice or select
+        total_available = len(raw_dataset)
+        num_to_take = min(total_available, data_cfg.num_samples)
+        print(f"Non-streaming mode: Selecting {num_to_take:,} samples from {total_available:,} total...")
+        
+        # Take a subset if requested
+        if num_to_take < total_available:
+            # We use a deterministic split
+            subset = raw_dataset.select(range(num_to_take))
+        else:
+            subset = raw_dataset
+            
+        splitted = subset.train_test_split(test_size=0.1, seed=42)
+        raw_train = splitted["train"]
+        raw_val = splitted["test"]
+        
     print(f"Split into {len(raw_train):,} train docs and {len(raw_val):,} val docs")
     
     # Tokenize and save
