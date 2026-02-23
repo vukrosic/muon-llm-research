@@ -39,7 +39,8 @@ def plot_detailed_spectral(files, labels, output_dir="plots/spectral"):
             style = '-' if d_idx == 0 else '--'
             plt.plot(steps, avg_ranks, marker='o', linestyle=style, markersize=5, label=f'{label_prefix} (Avg)')
             
-        plt.title(f'Effective Rank (Avg across layers) - {proj}')
+        comparison_title = " vs ".join(labels)
+        plt.title(f'{comparison_title}\nEffective Rank (Avg) - {proj}')
         plt.xlabel('Step')
         plt.ylabel('Rank')
         plt.legend()
@@ -65,7 +66,8 @@ def plot_detailed_spectral(files, labels, output_dir="plots/spectral"):
             style = '-' if d_idx == 0 else '--'
             plt.plot(steps, avg_aligns, marker='o', linestyle=style, markersize=5, label=f'{label_prefix} (Avg)')
             
-        plt.title(f'Update-Weight Alignment (Avg) - {proj}')
+        comparison_title = " vs ".join(labels)
+        plt.title(f'{comparison_title}\nUpdate-Weight Alignment (Avg) - {proj}')
         plt.xlabel('Step')
         plt.ylabel('Cosine Sim')
         plt.ylim(-0.1, 1.1)
@@ -90,7 +92,8 @@ def plot_detailed_spectral(files, labels, output_dir="plots/spectral"):
             s_vals = last_log['layers'][mid_layer]['projections'][proj]['singular_values']
             plt.plot(s_vals, label=f'{label_prefix} L{mid_layer}')
             
-        plt.title(f'SVD Spectrum (Mid Layer) - {proj}')
+        comparison_title = " vs ".join(labels)
+        plt.title(f'{comparison_title}\nSVD Spectrum (Mid Layer) - {proj}')
         plt.xlabel('Index')
         plt.ylabel('Singular Value')
         plt.yscale('log')
@@ -117,7 +120,8 @@ def plot_detailed_spectral(files, labels, output_dir="plots/spectral"):
             style = '-' if d_idx == 0 else '--'
             plt.plot(steps, avg_norms, marker='o', linestyle=style, markersize=5, label=f'{label_prefix} (Avg)')
             
-        plt.title(f'Grad Norm (Avg) - {proj}')
+        comparison_title = " vs ".join(labels)
+        plt.title(f'{comparison_title}\nGrad Norm (Avg) - {proj}')
         plt.xlabel('Step')
         plt.ylabel('Norm')
         plt.yscale('log')

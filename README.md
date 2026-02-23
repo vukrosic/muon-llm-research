@@ -26,10 +26,10 @@ Download dataset:
 python3 -c "
 from datasets import load_dataset
 import os
-print('Downloading 1B Pretraining Data...')
-ds = load_dataset('vukrosic/blueberry-1B-pretrain')
-os.makedirs('processed_data/pretrain_1B', exist_ok=True)
-ds.save_to_disk('processed_data/pretrain_1B')
+print('Downloading 2B Pretraining Data...')
+ds = load_dataset('vukrosic/blueberry-2B-pretrain')
+os.makedirs('processed_data/pretrain_2B', exist_ok=True)
+ds.save_to_disk('processed_data/pretrain_2B')
 print('✅ Full Data Ready!')
 "
 ```

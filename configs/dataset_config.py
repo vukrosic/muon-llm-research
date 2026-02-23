@@ -16,14 +16,21 @@ def get_latest_dataset(base_dir: str = "./processed_data") -> str:
         logger.warning(f"Directory {base_dir} does not exist, using default")
         return "processed_data/speedrun_40M"
     
-    # First, try to find pretrain_mix_* datasets
+    # First, try to find specific pre-prepared datasets in order of preference
+    for priority_name in ["pretrain_2B", "pretrain_1B"]:
+        p_path = os.path.join(base_dir, priority_name)
+        if os.path.isdir(p_path):
+            logger.info(f"Auto-detected priority dataset: {p_path}")
+            return p_path
+
+    # Next, try to find pretrain_mix_* datasets
     pretrain_patterns = glob.glob(os.path.join(base_dir, "pretrain_mix_*"))
     pretrain_dirs = [p for p in pretrain_patterns if os.path.isdir(p)]
     
     if pretrain_dirs:
         # Sort by modification time (newest first)
         latest = max(pretrain_dirs, key=os.path.getmtime)
-        logger.info(f"Auto-detected latest dataset: {latest}")
+        logger.info(f"Auto-detected latest mix dataset: {latest}")
         return latest
     
     # Fallback: any directory in processed_data
