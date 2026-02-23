@@ -54,6 +54,7 @@ class BlueberryConfig:
     track_manifold: bool = False
     detailed_log_every: int = 500
     log_milestones: Tuple[int, ...] = (100, 500, 1000)
+    checkpoint_token_milestone: int = 200_000_000 # Save checkpoint every 200M tokens
 
     def __post_init__(self):
         self.d_k = self.d_model // self.n_heads

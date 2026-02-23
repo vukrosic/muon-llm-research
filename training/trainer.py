@@ -241,7 +241,7 @@ def train_model(
     checkpoint_every: int = 5000,
     resume_from: Optional[str] = None,
     raw_metrics_dir: Optional[str] = None,
-    checkpoint_token_milestone: int = 500_000,
+    checkpoint_token_milestone: int = 200_000_000,
 ) -> Any:
     """
     Generic training function that can be used by experiments.
@@ -303,8 +303,9 @@ def train_model(
 
     # Training loop
     model.train()
-    step = start_step
+    step = start_step # This is now global_step (optimizer updates)
     tokens_seen = start_tokens
+    micro_step = 0 # Track accumulation
     desc = "Training"
     pbar = tqdm(total=config.train_tokens, desc=desc, unit="tokens", initial=tokens_seen)
     
@@ -367,13 +368,17 @@ def train_model(
                 loss = ce_loss / config.gradient_accumulation_steps
                 loss.backward()
 
+            # Per-microbatch tracking
+            pbar.update(batch_tokens)
+            tokens_seen += batch_tokens
+
             # Optimizer step
-            if (step + 1) % config.gradient_accumulation_steps == 0:
+            micro_step += 1
+            if micro_step == config.gradient_accumulation_steps:
                 torch.nn.utils.clip_grad_norm_(model.parameters(), config.grad_clip)
                 
                 # Capture updates for AdamW comparison and research tracking
-                opt_step = (step + 1) // config.gradient_accumulation_steps
-                is_logging_step = (opt_step > 0 and opt_step % config.detailed_log_every == 0)
+                is_logging_step = (step > 0 and step % config.detailed_log_every == 0)
                 # Capture updates if we are about to log Detailed Metrics OR Manifold Tracking
                 is_manifold_step = track_manifold and (step % log_every == 0)
                 needs_update_capture = is_logging_step or is_manifold_step
@@ -381,11 +386,7 @@ def train_model(
                 for optimizer in optimizers:
                     if needs_update_capture and not isinstance(optimizer, Muon):
                          # Snapshot parameters before step for non-Muon optimizers (AdamW)
-                         param_snapshots = {}
-                         for group in optimizer.param_groups:
-                             for p in group['params']:
-                                 if p.grad is not None:
-                                     param_snapshots[p] = p.detach().clone()
+                         param_snapshots = {p: p.detach().clone() for group in optimizer.param_groups for p in group['params'] if p.grad is not None}
                          
                          optimizer.step()
                          
@@ -397,8 +398,11 @@ def train_model(
                 
                 # Perform detailed logging before zeroing gradients
                 if is_logging_step:
-                    log_detailed_metrics(model, optimizers, opt_step, tokens_seen, metrics_history, raw_metrics_dir=raw_metrics_dir)
+                    log_detailed_metrics(model, optimizers, step, tokens_seen, metrics_history, raw_metrics_dir=raw_metrics_dir)
 
+                # Track current loss (once per update is enough for these scalars)
+                current_loss_val = ce_loss.item()
+                
                 # Zero gradients after logging
                 for optimizer in optimizers:
                     optimizer.zero_grad()
@@ -406,183 +410,172 @@ def train_model(
                 for scheduler in schedulers:
                     scheduler.step()
 
-            # Track current loss as a scalar only every 100 steps to avoid sync bottleneck
-            if step % 100 == 0 or step == 0:
-                current_loss_val = ce_loss.item()
-                
-            # Logging
-            if step % log_every == 0 or stopped_early:
-                with torch.no_grad():
-                    # Calculate accuracy using the shifted labels mask
-                    predictions = logits.argmax(dim=-1)
-                    mask = (shift_labels != -100)
-                    accuracy = (predictions[mask] == shift_labels[mask]).float().mean().item()
-                    
-                    # Use the scalar value we polled above
-                    perplexity = math.exp(min(current_loss_val if 'current_loss_val' in locals() else ce_loss.item(), 20))
-                    current_lr = schedulers[0].get_last_lr()[0] if schedulers else optimizers[0].param_groups[0]['lr']
-
-                # Update progress bar
-                tokens_per_step = config.batch_size * config.max_seq_len * config.gradient_accumulation_steps
-                est_total_steps = config.train_tokens // tokens_per_step
-                
-                pbar.set_postfix({
-                    'step': f'{step}/{est_total_steps}',
-                    'loss': f'{current_loss_val:.4f}',
-                    'acc': f'{accuracy:.3f}',
-                    'lr': f'{current_lr:.5f}'
-                })
-                # Console print for visibility
-                if step % (log_every * 10) == 0 or stopped_early:
-                    print(f" [Step {step}] Loss: {current_loss_val:.4f} | Acc: {accuracy:.3f} | LR: {current_lr:.6f}")
-
-                # Manifold Tracking
-                if track_manifold:
+                # LOGGING & EVALUATION (Optimizer Step Synchronized)
+                if step % log_every == 0 or stopped_early:
                     with torch.no_grad():
-                        # Track all layers for heatmaps
-                        num_layers = len(model.transformer_blocks)
-                        for i, block in enumerate(model.transformer_blocks):
-                            # Access the merged qkvo_proj
-                            proj = block.attention.qkvo_proj
-                            q_size = block.attention.q_size
-                            kv_size = block.attention.kv_size
-                            
-                            w_q = proj[:q_size]
-                            w_k = proj[q_size : q_size + kv_size]
-                            w_v = proj[q_size + kv_size : q_size + 2 * kv_size]
-                            
-                            q_stats = compute_spectral_stats(w_q)
-                            k_stats = compute_spectral_stats(w_k)
-                            v_stats = compute_spectral_stats(w_v)
-                            o_stats = compute_spectral_stats(proj[block.attention.qkv_size:])
-                            
-                            up_stats = compute_spectral_stats(block.feed_forward.up_proj.weight)
-                            down_stats = compute_spectral_stats(block.feed_forward.down_proj.weight)
-                            
-                            metrics_history['manifold_history'][f'spec_norm_Q_{i}'].append(q_stats['max'])
-                            metrics_history['manifold_history'][f'spec_norm_K_{i}'].append(k_stats['max'])
-                            metrics_history['manifold_history'][f'spec_norm_V_{i}'].append(v_stats['max'])
-                            metrics_history['manifold_history'][f'spec_norm_O_{i}'].append(o_stats['max'])
-                            metrics_history['manifold_history'][f'spec_norm_Up_{i}'].append(up_stats['max'])
-                            metrics_history['manifold_history'][f'spec_norm_Down_{i}'].append(down_stats['max'])
-                            
-                            # Log Spectral Entropy (Capacity Allocation) for Q and V
-                            metrics_history['manifold_history'][f'entropy_Q_{i}'].append(compute_spectral_entropy(w_q))
-                            metrics_history['manifold_history'][f'entropy_V_{i}'].append(compute_spectral_entropy(w_v))
-                            
-                            # Log Orthogonality Error (Manifold Departure)
-                            metrics_history['manifold_history'][f'ortho_err_Q_{i}'].append(compute_orthogonality_error(w_q))
-                            metrics_history['manifold_history'][f'ortho_err_V_{i}'].append(compute_orthogonality_error(w_v))
-
-                            # Log Update-Weight Alignment (Geometric Lock-in)
-                            muon_opt = optimizers[0]
-                            if proj in muon_opt.state and 'last_update' in muon_opt.state[proj]:
-                                delta_proj = muon_opt.state[proj]['last_update'].to(proj.device)
-                                delta_q = delta_proj[:q_size]
-                                delta_v = delta_proj[q_size + kv_size : q_size + 2 * kv_size]
-                                
-                                metrics_history['manifold_history'][f'alignment_Q_{i}'].append(compute_subspace_alignment(w_q, delta_q, k=5))
-                                metrics_history['manifold_history'][f'alignment_V_{i}'].append(compute_subspace_alignment(w_v, delta_v, k=5))
-                                
-                                # Track Update Rank (The "Needle vs Wave" hypothesis)
-                                # Handles both Muon (momentum_buffer) and AdamW (exp_avg)
-                                m_key = 'momentum_buffer' if 'momentum_buffer' in muon_opt.state[proj] else 'exp_avg'
-                                
-                                if proj in muon_opt.state and m_key in muon_opt.state[proj]:
-                                    buf = muon_opt.state[proj][m_key]
-                                    buf_q = buf[:q_size]
-                                    buf_v = buf[q_size + kv_size : q_size + 2 * kv_size]
-                                    
-                                    from utils.spectral import compute_effective_rank
-                                    metrics_history['manifold_history'][f'update_rank_Q_{i}'].append(compute_effective_rank(buf_q))
-                                    metrics_history['manifold_history'][f'update_rank_V_{i}'].append(compute_effective_rank(buf_v))
-                            
-                            # Track detailed stats for first and last layers
-                            if i == 0 or i == num_layers - 1:
-                                suffix = "0" if i == 0 else "last"
-                                metrics_history['manifold_history'][f'spec_gap_Q_{suffix}'].append(q_stats['gap'])
-                                metrics_history['manifold_history'][f'spec_vals_Q_{suffix}'].append(compute_singular_values(w_q, n=10))
+                        # Calculate accuracy using the shifted labels mask
+                        predictions = logits.argmax(dim=-1)
+                        mask = (shift_labels != -100)
+                        accuracy = (predictions[mask] == shift_labels[mask]).float().mean().item()
                         
-                        # Add loss and steps to manifold history for synchronization
-                        metrics_history['manifold_history']['loss'].append(current_loss_val)
-                        metrics_history['manifold_history']['steps'].append(step)
-                        metrics_history['manifold_history']['tokens'].append(tokens_seen)
-            
-            pbar.update(batch_tokens)
-            tokens_seen += batch_tokens
+                        perplexity = math.exp(min(current_loss_val, 20))
+                        current_lr = schedulers[0].get_last_lr()[0] if schedulers else optimizers[0].param_groups[0]['lr']
 
-            if stopped_early:
-                current_loss_val = ce_loss.item()
-                break
+                    # Update progress bar postfix
+                    tokens_per_step = config.batch_size * config.max_seq_len * config.gradient_accumulation_steps
+                    est_total_steps = config.train_tokens // tokens_per_step
+                    
+                    pbar.set_postfix({
+                        'step': f'{step}/{est_total_steps}',
+                        'loss': f'{current_loss_val:.4f}',
+                        'acc': f'{accuracy:.3f}',
+                        'lr': f'{current_lr:.5f}'
+                    })
+                    # Console print for visibility
+                    if (step > 0 and step % (log_every * 10) == 0) or stopped_early:
+                        print(f" [Step {step}] Loss: {current_loss_val:.4f} | Acc: {accuracy:.3f} | LR: {current_lr:.6f}")
 
-            # Evaluation
-            is_milestone = False
-            if config.eval_milestones and step in config.eval_milestones:
-                is_milestone = True
-            elif config.eval_every is not None and step % config.eval_every == 0 and step > 0:
-                is_milestone = True
+                    # Manifold Tracking
+                    if track_manifold:
+                        with torch.no_grad():
+                            # Track all layers for heatmaps
+                            num_layers = len(model.transformer_blocks)
+                            for i, block in enumerate(model.transformer_blocks):
+                                # Access the merged qkvo_proj
+                                proj = block.attention.qkvo_proj
+                                q_size = block.attention.q_size
+                                kv_size = block.attention.kv_size
+                                
+                                w_q = proj[:q_size]
+                                w_k = proj[q_size : q_size + kv_size]
+                                w_v = proj[q_size + kv_size : q_size + 2 * kv_size]
+                                
+                                q_stats = compute_spectral_stats(w_q)
+                                k_stats = compute_spectral_stats(w_k)
+                                v_stats = compute_spectral_stats(w_v)
+                                o_stats = compute_spectral_stats(proj[block.attention.qkv_size:])
+                                
+                                up_stats = compute_spectral_stats(block.feed_forward.up_proj.weight)
+                                down_stats = compute_spectral_stats(block.feed_forward.down_proj.weight)
+                                
+                                metrics_history['manifold_history'][f'spec_norm_Q_{i}'].append(q_stats['max'])
+                                metrics_history['manifold_history'][f'spec_norm_K_{i}'].append(k_stats['max'])
+                                metrics_history['manifold_history'][f'spec_norm_V_{i}'].append(v_stats['max'])
+                                metrics_history['manifold_history'][f'spec_norm_O_{i}'].append(o_stats['max'])
+                                metrics_history['manifold_history'][f'spec_norm_Up_{i}'].append(up_stats['max'])
+                                metrics_history['manifold_history'][f'spec_norm_Down_{i}'].append(down_stats['max'])
+                                
+                                # Log Spectral Entropy (Capacity Allocation) for Q and V
+                                metrics_history['manifold_history'][f'entropy_Q_{i}'].append(compute_spectral_entropy(w_q))
+                                metrics_history['manifold_history'][f'entropy_V_{i}'].append(compute_spectral_entropy(w_v))
+                                
+                                # Log Orthogonality Error (Manifold Departure)
+                                metrics_history['manifold_history'][f'ortho_err_Q_{i}'].append(compute_orthogonality_error(w_q))
+                                metrics_history['manifold_history'][f'ortho_err_V_{i}'].append(compute_orthogonality_error(w_v))
 
-            if is_milestone:
-                eval_metrics = evaluate_model(model, val_loader, config)
-                elapsed_time = (time.time() - train_start_time) / 60
-                current_lr = schedulers[0].get_last_lr()[0] if schedulers else optimizers[0].param_groups[0]['lr']
-                
-                # Track metrics
-                metrics_history['steps'].append(step)
-                metrics_history['val_losses'].append(eval_metrics['val_loss'])
-                metrics_history['val_accuracies'].append(eval_metrics['val_accuracy'])
-                metrics_history['val_perplexities'].append(eval_metrics['val_perplexity'])
-                metrics_history['elapsed_times'].append(elapsed_time)
-                metrics_history['learning_rates'].append(current_lr)
-                
-                print(f"\nStep {step}: Val Loss: {eval_metrics['val_loss']:.4f}, "
-                      f"Val Acc: {eval_metrics['val_accuracy']:.4f}, "
-                      f"Val PPL: {eval_metrics['val_perplexity']:.2f}, "
-                      f"LR: {current_lr:.5f}")
-                
-                # Early stopping check
-                if early_stopper is not None:
-                    if early_stopper(eval_metrics['val_loss'], step):
-                        current_loss_val = ce_loss.item()
-                        stopped_early = True
-                        break
+                                # Log Update-Weight Alignment (Geometric Lock-in)
+                                muon_opt = optimizers[0]
+                                if proj in muon_opt.state and 'last_update' in muon_opt.state[proj]:
+                                    delta_proj = muon_opt.state[proj]['last_update'].to(proj.device)
+                                    delta_q = delta_proj[:q_size]
+                                    delta_v = delta_proj[q_size + kv_size : q_size + 2 * kv_size]
+                                    
+                                    metrics_history['manifold_history'][f'alignment_Q_{i}'].append(compute_subspace_alignment(w_q, delta_q, k=5))
+                                    metrics_history['manifold_history'][f'alignment_V_{i}'].append(compute_subspace_alignment(w_v, delta_v, k=5))
+                                    
+                                    # Track Update Rank (The "Needle vs Wave" hypothesis)
+                                    # Handles both Muon (momentum_buffer) and AdamW (exp_avg)
+                                    m_key = 'momentum_buffer' if 'momentum_buffer' in muon_opt.state[proj] else 'exp_avg'
+                                    
+                                    if proj in muon_opt.state and m_key in muon_opt.state[proj]:
+                                        buf = muon_opt.state[proj][m_key]
+                                        buf_q = buf[:q_size]
+                                        buf_v = buf[q_size + kv_size : q_size + 2 * kv_size]
+                                        
+                                        from utils.spectral import compute_effective_rank
+                                        metrics_history['manifold_history'][f'update_rank_Q_{i}'].append(compute_effective_rank(buf_q))
+                                        metrics_history['manifold_history'][f'update_rank_V_{i}'].append(compute_effective_rank(buf_v))
+                                
+                                # Track detailed stats for first and last layers
+                                if i == 0 or i == num_layers - 1:
+                                    suffix = "0" if i == 0 else "last"
+                                    metrics_history['manifold_history'][f'spec_gap_Q_{suffix}'].append(q_stats['gap'])
+                                    metrics_history['manifold_history'][f'spec_vals_Q_{suffix}'].append(compute_singular_values(w_q, n=10))
+                            
+                            # Add loss and steps to manifold history for synchronization
+                            metrics_history['manifold_history']['loss'].append(current_loss_val)
+                            metrics_history['manifold_history']['steps'].append(step)
+                            metrics_history['manifold_history']['tokens'].append(tokens_seen)
 
-            # Save periodic checkpoint (both step-based and token-based)
+                # EVALUATION
+                is_eval_milestone = (config.eval_milestones and step in config.eval_milestones) or (config.eval_every is not None and step % config.eval_every == 0 and step > 0)
+                if is_eval_milestone:
+                    eval_metrics = evaluate_model(model, val_loader, config)
+                    elapsed_time = (time.time() - train_start_time) / 60
+                    current_lr = schedulers[0].get_last_lr()[0] if schedulers else optimizers[0].param_groups[0]['lr']
+                    
+                    # Track metrics
+                    metrics_history['steps'].append(step)
+                    metrics_history['val_losses'].append(eval_metrics['val_loss'])
+                    metrics_history['val_accuracies'].append(eval_metrics['val_accuracy'])
+                    metrics_history['val_perplexities'].append(eval_metrics['val_perplexity'])
+                    metrics_history['elapsed_times'].append(elapsed_time)
+                    metrics_history['learning_rates'].append(current_lr)
+                    
+                    print(f"\nStep {step}: Val Loss: {eval_metrics['val_loss']:.4f}, "
+                          f"Val Acc: {eval_metrics['val_accuracy']:.4f}, "
+                          f"Val PPL: {eval_metrics['val_perplexity']:.2f}, "
+                          f"LR: {current_lr:.5f}")
+                    
+                    # Early stopping check
+                    if early_stopper is not None:
+                        if early_stopper(eval_metrics['val_loss'], step):
+                            stopped_early = True
+
+                # Step-based Checkpointing
+                is_step_milestone = (checkpoint_every > 0 and step > 0 and step % checkpoint_every == 0)
+                if checkpoint_dir and is_step_milestone:
+                    ckpt_dir = Path(checkpoint_dir)
+                    ckpt_dir.mkdir(parents=True, exist_ok=True)
+                    ckpt_path = ckpt_dir / "latest_checkpoint.pt"
+                    
+                    torch.save({
+                        'step': step,
+                        'tokens_seen': tokens_seen,
+                        'model_state_dict': model.state_dict(),
+                        'optimizer_states': [opt.state_dict() for opt in optimizers],
+                        'scheduler_states': [sch.state_dict() for sch in schedulers] if schedulers else [],
+                        'metrics_history': metrics_history,
+                    }, ckpt_path)
+
+                # Reset micro_step and increment global step
+                micro_step = 0
+                step += 1
+
+            # Token-based Checkpointing (checks per microbatch)
             is_token_milestone = (tokens_seen // checkpoint_token_milestone) > ((tokens_seen - batch_tokens) // checkpoint_token_milestone)
-            is_step_milestone = (checkpoint_every > 0 and step > 0 and step % checkpoint_every == 0)
-            
-            if checkpoint_dir and (is_token_milestone or is_step_milestone):
+            if checkpoint_dir and is_token_milestone:
                 ckpt_dir = Path(checkpoint_dir)
                 ckpt_dir.mkdir(parents=True, exist_ok=True)
+                milestone_gb = (tokens_seen // checkpoint_token_milestone) * checkpoint_token_milestone // 1_000_000
+                ckpt_path = ckpt_dir / f"step_{step}_{milestone_gb}M_tokens.pt"
+                print(f"   💾 Token-based checkpoint saved at {tokens_seen:,} tokens")
                 
-                if is_token_milestone:
-                    milestone_gb = (tokens_seen // checkpoint_token_milestone) * checkpoint_token_milestone // 1_000_000
-                    ckpt_path = ckpt_dir / f"step_{step}_{milestone_gb}M_tokens.pt"
-                    print(f"   💾 Token-based checkpoint saved at {tokens_seen:,} tokens")
-                else:
-                    ckpt_path = ckpt_dir / "latest_checkpoint.pt"
-                
-                # We save a minimal set needed for resuming
-                torch.save({
+                state = {
                     'step': step,
                     'tokens_seen': tokens_seen,
                     'model_state_dict': model.state_dict(),
                     'optimizer_states': [opt.state_dict() for opt in optimizers],
                     'scheduler_states': [sch.state_dict() for sch in schedulers] if schedulers else [],
                     'metrics_history': metrics_history,
-                }, ckpt_path)
+                }
+                torch.save(state, ckpt_path)
                 
-                # Always update latest_checkpoint.pt if it was a step milestone or just to be safe
-                torch.save({
-                    'step': step,
-                    'tokens_seen': tokens_seen,
-                    'model_state_dict': model.state_dict(),
-                    'optimizer_states': [opt.state_dict() for opt in optimizers],
-                    'scheduler_states': [sch.state_dict() for sch in schedulers] if schedulers else [],
-                    'metrics_history': metrics_history,
-                }, ckpt_dir / "latest_checkpoint.pt")
-
-            step += 1
+                # Also update latest
+                torch.save(state, ckpt_dir / "latest_checkpoint.pt")
+                
+            if stopped_early:
+                break
         
         # If we finished the inner loop but didn't stop early, 
         # ensure we have the most recent loss from the very last batch
@@ -896,7 +889,8 @@ def train_minimal_llm(
         resume_from=os.path.join(checkpoint_dir, "latest_checkpoint.pt") if resume else None,
         checkpoint_dir=checkpoint_dir,
         checkpoint_every=getattr(config, 'save_every', 2000),
-        raw_metrics_dir=raw_metrics_dir
+        raw_metrics_dir=raw_metrics_dir,
+        checkpoint_token_milestone=config.checkpoint_token_milestone,
     )
     
     total_training_time = results['training_time']
