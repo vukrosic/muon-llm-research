@@ -285,7 +285,8 @@ def main():
     parser.add_argument("--save_every", type=int, default=5000, help="Override save_every steps")
     parser.add_argument("--batch_size", type=int, help="Override batch_size")
     parser.add_argument("--gradient_accumulation_steps", type=int, help="Override gradient_accumulation_steps")
-    parser.add_argument("--log_every", type=int, default=100, help="Logging frequency in steps")
+    parser.add_argument("--log_every", type=int, default=None, help="Logging frequency in steps")
+    parser.add_argument("--num_workers", type=int, default=2, help="DataLoader worker processes")
     parser.add_argument("--warmup", type=str, default="true", help="Whether to perform untimed compilation warmup (true/false)")
     parser.add_argument("--track_manifold", type=str, default="false", help="Whether to track manifold spectral statistics (true/false)")
     parser.add_argument("--resume", action="store_true", help="Resume training from latest_checkpoint.pt in the output directory")
@@ -350,7 +351,7 @@ def main():
         config.log_every = args.log_every
     if args.optimizer is not None:
         config.optimizer_type = args.optimizer
-    if args.seed is not 42 or config.seed == 42: # Only override if user provided it or if config is default
+    if args.seed != 42 or config.seed == 42: # Only override if user provided it or if config is default
         config.seed = args.seed
     
     # Finally, set variables that were derived from overrides
@@ -379,8 +380,8 @@ def main():
         config.log_every = 1000
         config.eval_every = None
     
-    # Allow command line override ONLY if explicitly provided (argparse default check)
-    if args.log_every != 100: # 100 is the default in parser
+    # Allow command line override ONLY if explicitly provided
+    if args.log_every is not None:
         config.log_every = args.log_every
     
     use_warmup = (args.warmup.lower() == "true")
@@ -439,9 +440,9 @@ def main():
 
     loader_args = dict(
         batch_size=config.batch_size,
-        num_workers=2,
+        num_workers=args.num_workers,
         pin_memory=torch.cuda.is_available(),
-        persistent_workers=True,
+        persistent_workers=(args.num_workers > 0),
         worker_init_fn=worker_init_fn,
         generator=g,
     )

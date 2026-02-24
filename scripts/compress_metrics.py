@@ -41,8 +41,8 @@ def compress_jsonl_file(file_path):
             record = json.loads(line)
             step = record.get("step", 0)
             
-            # Keep log if it matches new interval (2500) OR specific early milestones
-            if step % 2500 == 0 or step in [100, 500, 1000]:
+            # Keep log if it matches new interval (250) OR specific early milestones
+            if step % 250 == 0 or step in [100, 500, 1000]:
                 original_sv = record.get("singular_values", [])
                 
                 # We can't subsample if they were already subsampled or missing

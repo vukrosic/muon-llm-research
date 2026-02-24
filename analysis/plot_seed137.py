@@ -1,5 +1,6 @@
 import os
 import json
+import argparse
 import numpy as np
 import matplotlib.pyplot as plt
 from pathlib import Path
@@ -19,7 +20,7 @@ def compute_entropy(singular_values):
     s_norm = s / (np.sum(s) + 1e-12)
     return -np.sum(s_norm * np.log(s_norm + 1e-12))
 
-def plot_heatmaps(records, exp_name, output_dir, metric='entropy'):
+def plot_heatmaps(records, exp_name, output_dir, metric='entropy', seed='137'):
     projections = ['q', 'k', 'v', 'o', 'up', 'down']
     
     if metric == 'entropy':
@@ -50,10 +51,10 @@ def plot_heatmaps(records, exp_name, output_dir, metric='entropy'):
         if idx == len(projections) - 1: ax.set_xlabel("Step")
 
     plt.tight_layout()
-    plt.savefig(output_dir / f"heatmap_{metric}_seed137.png")
+    plt.savefig(output_dir / f"heatmap_{metric}_seed{seed}.png")
     plt.close()
 
-def plot_single_experiment(metrics_path, output_dir):
+def plot_single_experiment(metrics_path, output_dir, seed='137'):
     with open(metrics_path, 'r') as f:
         data = json.load(f)
     
@@ -64,31 +65,36 @@ def plot_single_experiment(metrics_path, output_dir):
     
     plt.figure(figsize=(10, 5))
     plt.plot(steps, losses, marker='o', color='tab:blue', label='Val Loss')
-    plt.title(f"Validation Loss - Muon Seed 137")
+    plt.title(f"Validation Loss - Muon Seed {seed}")
     plt.xlabel("Steps")
     plt.ylabel("Loss")
     plt.grid(True, alpha=0.3)
-    plt.savefig(output_dir / "loss_seed137.png")
+    plt.savefig(output_dir / f"loss_seed{seed}.png")
     plt.close()
 
     plt.figure(figsize=(10, 5))
     plt.plot(steps, accs, marker='o', color='tab:green', label='Val Accuracy')
-    plt.title(f"Validation Accuracy - Muon Seed 137")
+    plt.title(f"Validation Accuracy - Muon Seed {seed}")
     plt.xlabel("Steps")
     plt.ylabel("Accuracy")
     plt.grid(True, alpha=0.3)
-    plt.savefig(output_dir / "accuracy_seed137.png")
+    plt.savefig(output_dir / f"accuracy_seed{seed}.png")
     plt.close()
 
 if __name__ == "__main__":
-    exp_dir = Path("experiments/01_muon_vs_adamw_baseline/muon_seed137")
-    out_dir = Path("experiments/01_muon_vs_adamw_baseline/plots_seed137")
+    parser = argparse.ArgumentParser(description="Plot metrics/manifold heatmaps for a Muon seed run.")
+    parser.add_argument("--seed", default="137", help="Seed id to plot, e.g. 42 or 137")
+    args = parser.parse_args()
+    seed = str(args.seed)
+
+    exp_dir = Path(f"experiments/01_muon_vs_adamw_baseline/muon_seed{seed}")
+    out_dir = Path(f"experiments/01_muon_vs_adamw_baseline/plots_seed{seed}")
     out_dir.mkdir(parents=True, exist_ok=True)
     
     # Standard plots
     metrics_file = exp_dir / "metrics.json"
     if metrics_file.exists():
-        plot_single_experiment(metrics_file, out_dir)
+        plot_single_experiment(metrics_file, out_dir, seed=seed)
     
     # Heatmaps
     stats_file = exp_dir / "metrics" / "manifold_stats.jsonl"
@@ -96,6 +102,6 @@ if __name__ == "__main__":
         records = load_jsonl(stats_file)
         for m in ['entropy', 'update_alignment', 'effective_rank']:
             print(f"Generating heatmap for {m}...")
-            plot_heatmaps(records, "Muon Seed 137", out_dir, metric=m)
+            plot_heatmaps(records, f"Muon Seed {seed}", out_dir, metric=m, seed=seed)
     
     print(f"Done. Plots saved to {out_dir}")
